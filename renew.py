@@ -45,6 +45,8 @@ TG_RENEWAL_PATTERN = re.compile(r'[A-Za-z0-9+/=]{32,}')
 # ===================== 代理检测 =====================
 def get_proxies():
     """返回代理字典，若代理不可用则返回 None（直连）"""
+    if not PROXY_ADDR:
+        return None
     try:
         proxies = {"http": PROXY_ADDR, "https": PROXY_ADDR}
         # 用 google.com 检测连通性
@@ -485,13 +487,12 @@ def renew_account(account):
             co.set_argument('--disable-dev-shm-usage')
             co.set_argument('--disable-gpu')
             co.set_argument('--headless=new')
-        # 使用随机端口避免冲突
-        co.set_local_port(0)
+        # 不手动设置本地端口，让 DrissionPage 自动分配
         if proxies is not None:
             co.set_proxy(PROXY_ADDR)
         co.set_user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-        # 设置 Chromium 路径（GitHub Actions 中安装的 chromium-browser）
-        co.set_browser_path('/usr/bin/chromium-browser')
+        # 不指定浏览器路径，让 DrissionPage 自动查找（它会尝试 chromium-browser）
+        # co.set_browser_path('/usr/bin/chromium-browser')  # 如果自动找不到可取消注释
         page = ChromiumPage(co)
 
         # ---------- 尝试 Cookie 登录 ----------
