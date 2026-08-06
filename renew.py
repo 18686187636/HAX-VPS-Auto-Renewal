@@ -3,7 +3,7 @@
 """
 HAX VPS Auto-Renewal
 - Cookie 快速登录（通过 JS 注入 PHPSESSID）
-- 若 Cookie 失效，自动回退 Telegram OAuth 登录
+- 若 Cookie 失效，自动回退 Telegram OAuth 登录（已修复）
 - 代理自动检测 + 出口 IP 验证（已成功）
 - 算术验证码 + 音频 reCAPTCHA 识别
 - 多 Bot 轮询获取续期码
@@ -59,17 +59,13 @@ def get_proxies():
     """返回代理字典，若代理不可用则返回 None（直连）"""
     if not PROXY_ADDR:
         return None
-    # 检查本地端口是否监听（支持 HTTP 或 SOCKS5）
     if is_port_open('127.0.0.1', 1080) or is_port_open('127.0.0.1', 1081):
         proxies = {"http": PROXY_ADDR, "https": PROXY_ADDR}
         return proxies
     return None
 
 def check_proxy_ip(proxies):
-    """
-    通过代理获取出口 IP，验证代理是否真正生效
-    返回 (成功, IP字符串)
-    """
+    """通过代理获取出口 IP，验证代理是否真正生效"""
     if not proxies:
         return False, None
     services = [
@@ -85,13 +81,9 @@ def check_proxy_ip(proxies):
                 ip = data.get('ip') or data.get('origin')
                 if ip:
                     return True, ip
-        except requests.exceptions.ConnectTimeout:
-            print(f"  [代理检测] 连接 {url} 超时")
-        except requests.exceptions.ProxyError as e:
-            print(f"  [代理检测] 代理错误: {e}")
         except Exception as e:
-            print(f"  [代理检测] 未知错误: {e}")
-        continue
+            print(f"  [代理检测] 连接 {url} 失败: {e}")
+            continue
     return False, None
 
 # ===================== 工具函数 =====================
@@ -122,48 +114,67 @@ def notify_failed(phone, step, error, bot_token, chat_id):
     msg = f"❌ <b>VPS 续期失败</b>\n\nHAX\n📱 {phone}\n📍 {step}\n⚠️ {error}\n⏰ {get_beijing_time()}"
     send_telegram_message(msg, bot_token, chat_id)
 
-# ===================== Telegram OAuth 登录（回退方案） =====================
+# ===================== Telegram OAuth 登录（修复版） =====================
 def login_with_telegram(page, phone):
+    """使用 Telegram OAuth 登录 HAX，返回是否成功（兼容 DrissionPage 4.x）"""
     print(f"  [LOGIN] 尝试 Telegram OAuth 登录: {phone}")
     try:
         page.get("https://hax.co.id/login")
         page.wait.doc_loaded(timeout=20)
         page.wait(5)
-        iframe_xpath = "xpath://iframe[contains(@src, 'oauth.telegram.org')]"
-        with page.with_frame(iframe_xpath) as frame_page:
-            btn = frame_page.ele("css:button.tgme_widget_login_button")
-            if not btn:
-                raise RuntimeError("未找到 Telegram 登录按钮")
-            btn.click_self()
-            print("  [LOGIN] 点击 Telegram 登录按钮")
-            page.wait(3)
-            oauth_tab_id = None
-            for tab_id in page.tab_ids:
-                tab = page.get_tab(tab_id)
-                if "oauth.telegram.org" in (tab.url or ""):
-                    oauth_tab_id = tab_id
-                    break
-            if not oauth_tab_id:
-                raise RuntimeError("未找到 OAuth tab")
-            oauth_page = page.get_tab(oauth_tab_id)
-            oauth_page.activate()
-            oauth_page.wait.doc_loaded(timeout=20)
-            phone_input = oauth_page.ele("css:#login-phone-code")
-            if not phone_input:
-                raise RuntimeError("未找到手机号输入框")
-            phone_input.input(phone, clear=True)
-            print(f"  [LOGIN] 输入手机号: {phone}")
+
+        # 查找 Telegram OAuth iframe 元素
+        iframe = page.ele("xpath://iframe[contains(@src, 'oauth.telegram.org')]", timeout=10)
+        if not iframe:
+            raise RuntimeError("未找到 Telegram OAuth iframe")
+
+        # 切换到 iframe 上下文（DrissionPage 4.x 使用 to_frame）
+        page.to_frame(iframe)
+        btn = page.ele("css:button.tgme_widget_login_button", timeout=5)
+        if not btn:
+            page.to_frame()  # 切回主页面
+            raise RuntimeError("未找到 Telegram 登录按钮")
+        btn.click_self()
+        page.to_frame()  # 切回主页面
+        print("  [LOGIN] 点击 Telegram 登录按钮")
+        page.wait(3)
+
+        # 查找新打开的 OAuth 标签页
+        oauth_tab_id = None
+        for tab_id in page.tab_ids:
+            tab = page.get_tab(tab_id)
+            if "oauth.telegram.org" in (tab.url or ""):
+                oauth_tab_id = tab_id
+                break
+        if not oauth_tab_id:
+            raise RuntimeError("未找到 OAuth tab")
+
+        oauth_page = page.get_tab(oauth_tab_id)
+        oauth_page.activate()
+        oauth_page.wait.doc_loaded(timeout=20)
+
+        # 输入手机号
+        phone_input = oauth_page.ele("css:#login-phone-code", timeout=5)
+        if not phone_input:
+            raise RuntimeError("未找到手机号输入框")
+        phone_input.input(phone, clear=True)
+        print(f"  [LOGIN] 输入手机号: {phone}")
+        page.wait(2)
+
+        # 点击继续按钮
+        continue_btn = oauth_page.ele("text:继续") or oauth_page.ele("css:button[type=submit]") or oauth_page.ele("css:button")
+        if continue_btn:
+            continue_btn.click_self()
+            print("  [LOGIN] 点击继续")
+
+        # 等待跳转回 vps-info
+        for _ in range(60):
             page.wait(2)
-            continue_btn = oauth_page.ele("text:继续") or oauth_page.ele("css:button[type=submit]") or oauth_page.ele("css:button")
-            if continue_btn:
-                continue_btn.click_self()
-                print("  [LOGIN] 点击继续")
-            for _ in range(60):
-                page.wait(2)
-                if "hax.co.id/vps-info" in (page.url or ""):
-                    print("  [LOGIN] 已跳转到 VPS 信息页")
-                    return True
-            raise RuntimeError("登录超时，未跳转到 VPS 信息页")
+            if "hax.co.id/vps-info" in (page.url or ""):
+                print("  [LOGIN] 已跳转到 VPS 信息页")
+                return True
+        raise RuntimeError("登录超时，未跳转到 VPS 信息页")
+
     except Exception as e:
         print(f"  [LOGIN] 失败: {e}")
         return False
@@ -481,51 +492,33 @@ def solve_arithmetic_captcha(page):
     print(f"  [CAPTCHA] 算式: {digits[0]} {op} {digits[1]} = {result}")
     return result
 
-# ===================== 设置 Cookie 的通用函数（兼容所有 DrissionPage 版本） =====================
+# ===================== 设置 Cookie 的通用函数 =====================
 def set_session_cookie(page, session_token):
-    """
-    通过多种方式尝试设置 PHPSESSID Cookie，确保兼容不同 DrissionPage 版本
-    """
-    # 方式1：使用 page.run_js 直接注入（最通用）
+    """通过多种方式尝试设置 PHPSESSID Cookie"""
     try:
-        page.run_js(f"""
-            document.cookie = 'PHPSESSID={session_token}; path=/; domain=.hax.co.id';
-        """)
+        page.run_js(f"document.cookie = 'PHPSESSID={session_token}; path=/; domain=.hax.co.id';")
         print("  [COOKIE] 通过 JS 注入成功")
         return True
     except Exception as e:
         print(f"  [COOKIE] JS 注入失败: {e}")
-    
-    # 方式2：尝试 page.set_cookies (旧版)
     try:
         page.set_cookies([{"name": "PHPSESSID", "value": session_token, "domain": ".hax.co.id", "path": "/"}])
         print("  [COOKIE] 通过 set_cookies 成功")
         return True
-    except AttributeError:
+    except Exception:
         pass
-    except Exception as e:
-        print(f"  [COOKIE] set_cookies 异常: {e}")
-    
-    # 方式3：尝试 page.cookies.set (新版)
     try:
         page.cookies.set("PHPSESSID", session_token, domain=".hax.co.id", path="/")
         print("  [COOKIE] 通过 cookies.set 成功")
         return True
-    except AttributeError:
+    except Exception:
         pass
-    except Exception as e:
-        print(f"  [COOKIE] cookies.set 异常: {e}")
-    
-    # 方式4：使用 page.set_cookie (单数) 
     try:
         page.set_cookie({"name": "PHPSESSID", "value": session_token, "domain": ".hax.co.id", "path": "/"})
         print("  [COOKIE] 通过 set_cookie 成功")
         return True
-    except AttributeError:
+    except Exception:
         pass
-    except Exception as e:
-        print(f"  [COOKIE] set_cookie 异常: {e}")
-    
     print("  [COOKIE] 所有方式均失败，无法设置 Cookie")
     return False
 
@@ -542,7 +535,6 @@ def renew_account(account):
 
     print(f"\n{'='*60}\n  续期: {phone}\n{'='*60}")
 
-    # ---------- 代理检测与出口 IP 验证 ----------
     proxies = get_proxies()
     if proxies:
         print(f"🔗 代理地址: {PROXY_ADDR}")
@@ -550,8 +542,8 @@ def renew_account(account):
         if ok:
             print(f"📍 代理出口 IP: {ip}")
         else:
-            print("⚠️ 代理出口 IP 获取失败，代理可能未生效，将使用直连")
-            proxies = None  # 降级为直连
+            print("⚠️ 代理出口 IP 获取失败，将使用直连")
+            proxies = None
     else:
         print("🔗 代理不可用，使用直连")
 
@@ -574,9 +566,7 @@ def renew_account(account):
         if session_token:
             print("  [LOGIN] 尝试使用 session_token 快速登录...")
             page.get("https://hax.co.id/login")
-            # 使用通用函数设置 Cookie
             set_session_cookie(page, session_token)
-            # 刷新或直接访问 vps-info
             page.get("https://hax.co.id/vps-info")
             page.wait.doc_loaded(timeout=15)
             if "login" not in page.url.lower():
