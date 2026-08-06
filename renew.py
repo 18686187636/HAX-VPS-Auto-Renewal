@@ -481,9 +481,16 @@ def renew_account(account):
         co = ChromiumOptions()
         if HEADLESS:
             co.headless(True)
+            co.set_argument('--no-sandbox')
+            co.set_argument('--disable-dev-shm-usage')
+            co.set_argument('--disable-gpu')
+            co.set_argument('--headless=new')
+        co.auto_port()   # 避免端口冲突
         if proxies is not None:
             co.set_proxy(PROXY_ADDR)
         co.set_user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        # 若系统 chromium 不在 PATH，可指定路径（通常 ubuntu 安装后可用）
+        # co.set_browser_path('/usr/bin/chromium-browser')
         page = ChromiumPage(co)
 
         # ---------- 尝试 Cookie 登录 ----------
@@ -600,7 +607,6 @@ def renew_account(account):
         print("  [reCAPTCHA] 开始音频验证...")
         if not solve_recaptcha(page, timeout=90):
             print("  [reCAPTCHA] 自动失败，尝试重试一次...")
-            # 再试一次
             if not solve_recaptcha(page, timeout=60):
                 raise RuntimeError("reCAPTCHA 未通过")
 
