@@ -601,14 +601,22 @@ def renew_account(account):
 
         print("  ✅ 登录成功，开始续期流程")
 
-        # ---------- 处理广告 ----------
+        # ---------- 处理广告（修复 press 错误） ----------
         time.sleep(3)
-        page.actions.press("Escape").perform()
+        try:
+            # 尝试按下 ESC 键，某些版本可能没有 press 方法，忽略错误
+            page.actions.press("Escape")
+        except Exception:
+            pass
+        time.sleep(1)
         for kw in ["Close", "close", "×"]:
-            el = page.ele(f'xpath://*[contains(text(), "{kw}")]')
-            if el and el.is_displayed:
-                el.click()
-                break
+            try:
+                el = page.ele(f'xpath://*[contains(text(), "{kw}")]')
+                if el and el.is_displayed:
+                    el.click()
+                    break
+            except Exception:
+                pass
         time.sleep(2)
 
         # ---------- 导航到续期 ----------
