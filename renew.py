@@ -37,15 +37,12 @@ except ImportError:
 ACCOUNTS_JSON = os.getenv("ACCOUNTS_JSON", "[]")
 ACCOUNTS = json.loads(ACCOUNTS_JSON)
 HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
-
-# 代理地址（优先从环境变量读取，若未设置则使用默认）
 PROXY_ADDR = os.getenv("PROXY_SERVER", "socks5://127.0.0.1:1080")
 CODE_FILE = "renewal_code.txt"
 TG_RENEWAL_PATTERN = re.compile(r'[A-Za-z0-9+/=]{32,}')
 
-# ===================== 代理检测与出口 IP 验证 =====================
+# ===================== 代理检测 =====================
 def is_port_open(host, port):
-    """检查端口是否可连接"""
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(3)
@@ -56,16 +53,13 @@ def is_port_open(host, port):
         return False
 
 def get_proxies():
-    """返回代理字典，若代理不可用则返回 None（直连）"""
     if not PROXY_ADDR:
         return None
     if is_port_open('127.0.0.1', 1080) or is_port_open('127.0.0.1', 1081):
-        proxies = {"http": PROXY_ADDR, "https": PROXY_ADDR}
-        return proxies
+        return {"http": PROXY_ADDR, "https": PROXY_ADDR}
     return None
 
 def check_proxy_ip(proxies):
-    """通过代理获取出口 IP，验证代理是否真正生效"""
     if not proxies:
         return False, None
     services = [
@@ -81,8 +75,7 @@ def check_proxy_ip(proxies):
                 ip = data.get('ip') or data.get('origin')
                 if ip:
                     return True, ip
-        except Exception as e:
-            print(f"  [代理检测] 连接 {url} 失败: {e}")
+        except Exception:
             continue
     return False, None
 
@@ -114,7 +107,7 @@ def notify_failed(phone, step, error, bot_token, chat_id):
     msg = f"❌ <b>VPS 续期失败</b>\n\nHAX\n📱 {phone}\n📍 {step}\n⚠️ {error}\n⏰ {get_beijing_time()}"
     send_telegram_message(msg, bot_token, chat_id)
 
-# ===================== Telegram OAuth 登录（修复版） =====================
+# ===================== Telegram OAuth 登录（最终修复版） =====================
 def login_with_telegram(page, phone):
     """使用 Telegram OAuth 登录 HAX，返回是否成功（兼容 DrissionPage 4.x）"""
     print(f"  [LOGIN] 尝试 Telegram OAuth 登录: {phone}")
@@ -123,19 +116,28 @@ def login_with_telegram(page, phone):
         page.wait.doc_loaded(timeout=20)
         page.wait(5)
 
-        # 查找 Telegram OAuth iframe 元素
-        iframe = page.ele("xpath://iframe[contains(@src, 'oauth.telegram.org')]", timeout=10)
-        if not iframe:
+        # 方法1：通过 page.frames 获取 frame 对象
+        frame = None
+        for f in page.frames:
+            if "oauth.telegram.org" in (f.url or ""):
+                frame = f
+                break
+        if not frame:
+            # 方法2：通过元素获取 frame
+            iframe_ele = page.ele("xpath://iframe[contains(@src, 'oauth.telegram.org')]", timeout=10)
+            if iframe_ele:
+                try:
+                    frame = iframe_ele.frame
+                except:
+                    pass
+        if not frame:
             raise RuntimeError("未找到 Telegram OAuth iframe")
 
-        # 切换到 iframe 上下文（DrissionPage 4.x 使用 to_frame）
-        page.to_frame(iframe)
-        btn = page.ele("css:button.tgme_widget_login_button", timeout=5)
+        # 在 frame 内点击登录按钮
+        btn = frame.ele("css:button.tgme_widget_login_button", timeout=5)
         if not btn:
-            page.to_frame()  # 切回主页面
             raise RuntimeError("未找到 Telegram 登录按钮")
         btn.click_self()
-        page.to_frame()  # 切回主页面
         print("  [LOGIN] 点击 Telegram 登录按钮")
         page.wait(3)
 
@@ -161,7 +163,7 @@ def login_with_telegram(page, phone):
         print(f"  [LOGIN] 输入手机号: {phone}")
         page.wait(2)
 
-        # 点击继续按钮
+        # 点击继续
         continue_btn = oauth_page.ele("text:继续") or oauth_page.ele("css:button[type=submit]") or oauth_page.ele("css:button")
         if continue_btn:
             continue_btn.click_self()
@@ -492,9 +494,8 @@ def solve_arithmetic_captcha(page):
     print(f"  [CAPTCHA] 算式: {digits[0]} {op} {digits[1]} = {result}")
     return result
 
-# ===================== 设置 Cookie 的通用函数 =====================
+# ===================== 设置 Cookie =====================
 def set_session_cookie(page, session_token):
-    """通过多种方式尝试设置 PHPSESSID Cookie"""
     try:
         page.run_js(f"document.cookie = 'PHPSESSID={session_token}; path=/; domain=.hax.co.id';")
         print("  [COOKIE] 通过 JS 注入成功")
@@ -519,7 +520,7 @@ def set_session_cookie(page, session_token):
         return True
     except Exception:
         pass
-    print("  [COOKIE] 所有方式均失败，无法设置 Cookie")
+    print("  [COOKIE] 所有方式均失败")
     return False
 
 # ===================== 单账号续期主流程 =====================
