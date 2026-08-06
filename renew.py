@@ -135,7 +135,7 @@ def login_with_telegram(page, phone):
         btn = frame.ele("css:button.tgme_widget_login_button", timeout=5)
         if not btn:
             raise RuntimeError("未找到 Telegram 登录按钮")
-        btn.click_self()
+        btn.click()   # 修正：使用 click() 而非 click_self()
         print("  [LOGIN] 点击 Telegram 登录按钮")
         page.wait(3)
 
@@ -164,7 +164,7 @@ def login_with_telegram(page, phone):
         # 点击继续
         continue_btn = oauth_page.ele("text:继续") or oauth_page.ele("css:button[type=submit]") or oauth_page.ele("css:button")
         if continue_btn:
-            continue_btn.click_self()
+            continue_btn.click()
             print("  [LOGIN] 点击继续")
 
         # 等待跳转回 vps-info
