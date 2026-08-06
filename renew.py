@@ -3,8 +3,8 @@
 """
 HAX VPS Auto-Renewal
 - Cookie 快速登录（通过 JS 注入 PHPSESSID）
-- 若 Cookie 失效，自动回退 Telegram OAuth 登录（已修复）
-- 代理自动检测 + 出口 IP 验证（已成功）
+- 若 Cookie 失效，自动回退 Telegram OAuth 登录（JS 方式，兼容所有版本）
+- 代理自动检测 + 出口 IP 验证
 - 算术验证码 + 音频 reCAPTCHA 识别
 - 多 Bot 轮询获取续期码
 - Telegram 通知
@@ -107,37 +107,24 @@ def notify_failed(phone, step, error, bot_token, chat_id):
     msg = f"❌ <b>VPS 续期失败</b>\n\nHAX\n📱 {phone}\n📍 {step}\n⚠️ {error}\n⏰ {get_beijing_time()}"
     send_telegram_message(msg, bot_token, chat_id)
 
-# ===================== Telegram OAuth 登录（最终修复版） =====================
+# ===================== Telegram OAuth 登录（JS 方式，兼容所有版本） =====================
 def login_with_telegram(page, phone):
-    """使用 Telegram OAuth 登录 HAX，返回是否成功（兼容 DrissionPage 4.x）"""
+    """使用 Telegram OAuth 登录 HAX，通过 JS 操作 iframe，无需切换上下文"""
     print(f"  [LOGIN] 尝试 Telegram OAuth 登录: {phone}")
     try:
         page.get("https://hax.co.id/login")
         page.wait.doc_loaded(timeout=20)
         page.wait(5)
 
-        # 方法1：通过 page.frames 获取 frame 对象
-        frame = None
-        for f in page.frames:
-            if "oauth.telegram.org" in (f.url or ""):
-                frame = f
-                break
-        if not frame:
-            # 方法2：通过元素获取 frame
-            iframe_ele = page.ele("xpath://iframe[contains(@src, 'oauth.telegram.org')]", timeout=10)
-            if iframe_ele:
-                try:
-                    frame = iframe_ele.frame
-                except:
-                    pass
-        if not frame:
-            raise RuntimeError("未找到 Telegram OAuth iframe")
-
-        # 在 frame 内点击登录按钮
-        btn = frame.ele("css:button.tgme_widget_login_button", timeout=5)
-        if not btn:
-            raise RuntimeError("未找到 Telegram 登录按钮")
-        btn.click_self()
+        # 在父页面通过 JS 点击 iframe 内的登录按钮
+        page.run_js("""
+            const iframe = document.querySelector('iframe[src*="oauth.telegram.org"]');
+            if (iframe) {
+                const doc = iframe.contentDocument || iframe.contentWindow.document;
+                const btn = doc.querySelector('button.tgme_widget_login_button');
+                if (btn) btn.click();
+            }
+        """)
         print("  [LOGIN] 点击 Telegram 登录按钮")
         page.wait(3)
 
@@ -718,7 +705,10 @@ if __name__ == "__main__":
     success = 0
     for idx, acc in enumerate(ACCOUNTS, 1):
         print(f"\n============================== 处理第 {idx}/{len(ACCOUNTS)} 个账号 ==============================")
-        if renew_account(acc):
-            success += 1
+        try:
+            if renew_account(acc):
+                success += 1
+        except Exception as e:
+            print(f"  ⚠️ 账号处理异常: {e}")
         time.sleep(random.randint(10, 30))
     print(f"\n{'='*60}\n完成: {success}/{len(ACCOUNTS)} 个账号续期成功\n{'='*60}")
