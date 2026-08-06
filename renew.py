@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal
-- Cookie 快速登录（通过 JS 注入 PHPSESSID）
-- 若 Cookie 失效，自动回退 Telegram OAuth 登录（使用 page.tab 切换标签页）
+HAX VPS Auto-Renewal (最终稳定版)
+- Cookie 快速登录（支持完整域和路径注入）
+- 若 Cookie 失效，自动回退 Telegram OAuth 登录（使用 page.tab 切换）
 - 代理自动检测 + 出口 IP 验证
 - 算术验证码 + 音频 reCAPTCHA 识别
 - 多 Bot 轮询获取续期码
 - Telegram 通知
-- 支持 GitHub Actions 无头运行
+- 兼容 DrissionPage 4.x
 """
 import os
 import sys
@@ -118,21 +118,18 @@ def find_frame_by_keyword(page, keyword):
         pass
     return None
 
-# ===================== Telegram OAuth 登录（使用 page.tab 切换标签页） =====================
+# ===================== Telegram OAuth 登录（使用 page.tab 切换） =====================
 def login_with_telegram(page, phone):
-    """使用 Telegram OAuth 登录 HAX，通过 page.tab 切换标签页"""
     print(f"  [LOGIN] 尝试 Telegram OAuth 登录: {phone}")
     try:
         page.get("https://hax.co.id/login")
         page.wait.doc_loaded(timeout=20)
         page.wait(5)
 
-        # 获取 Telegram OAuth iframe
         frame = find_frame_by_keyword(page, "oauth.telegram.org")
         if not frame:
             raise RuntimeError("未找到 Telegram OAuth iframe")
 
-        # 在 frame 内点击登录按钮
         btn = frame.ele("css:button.tgme_widget_login_button", timeout=5)
         if not btn:
             raise RuntimeError("未找到 Telegram 登录按钮")
@@ -149,7 +146,6 @@ def login_with_telegram(page, phone):
                 oauth_tab = t
                 break
         if not oauth_tab:
-            # 可能还没加载，再等一会
             time.sleep(2)
             for t in page.tabs:
                 if t != original_tab and "oauth.telegram.org" in t.url:
@@ -504,14 +500,19 @@ def solve_arithmetic_captcha(page):
     print(f"  [CAPTCHA] 算式: {digits[0]} {op} {digits[1]} = {result}")
     return result
 
-# ===================== 设置 Cookie =====================
+# ===================== 设置 Cookie（增强版） =====================
 def set_session_cookie(page, session_token):
+    """通过 JS 注入完整的 PHPSESSID Cookie，包含域和路径"""
     try:
-        page.run_js(f"document.cookie = 'PHPSESSID={session_token}; path=/; domain=.hax.co.id';")
+        page.run_js(f"""
+            document.cookie = 'PHPSESSID={session_token}; path=/; domain=.hax.co.id; SameSite=Lax';
+            document.cookie = 'PHPSESSID={session_token}; path=/vps-info; domain=.hax.co.id; SameSite=Lax';
+        """)
         print("  [COOKIE] 通过 JS 注入成功")
         return True
     except Exception as e:
         print(f"  [COOKIE] JS 注入失败: {e}")
+    # 备用方式：使用 DrissionPage 的 Cookie 设置方法
     try:
         page.set_cookies([{"name": "PHPSESSID", "value": session_token, "domain": ".hax.co.id", "path": "/"}])
         print("  [COOKIE] 通过 set_cookies 成功")
@@ -578,13 +579,19 @@ def renew_account(account):
             print("  [LOGIN] 尝试使用 session_token 快速登录...")
             page.get("https://hax.co.id/login")
             set_session_cookie(page, session_token)
+            # 验证 Cookie 是否真的注入成功
+            cookie_check = page.run_js("return document.cookie.includes('PHPSESSID');")
+            if cookie_check:
+                print("  [COOKIE] 验证：Cookie 已存在于浏览器")
+            else:
+                print("  [COOKIE] 验证：Cookie 注入后未找到，可能已失效")
             page.get("https://hax.co.id/vps-info")
             page.wait.doc_loaded(timeout=15)
             if "login" not in page.url.lower():
                 print("  ✅ Cookie 登录成功")
                 login_success = True
             else:
-                print("  ⚠️ Cookie 无效或已过期")
+                print("  ⚠️ Cookie 无效或已过期，请重新获取 PHPSESSID")
 
         if not login_success:
             print("  [LOGIN] 执行 Telegram OAuth 登录...")
