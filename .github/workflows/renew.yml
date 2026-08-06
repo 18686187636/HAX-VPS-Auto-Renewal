@@ -27,8 +27,8 @@ jobs:
           wget -q https://github.com/SagerNet/sing-box/releases/download/v1.13.16/sing-box-1.13.16-linux-amd64-glibc.tar.gz
           tar -xzf sing-box-*.tar.gz
           cd sing-box-*-linux-amd64-glibc
-          echo "$NODE_LINK" > node.txt
-          ./sing-box generate config -o config.json --node "$NODE_LINK"
+          # 动态生成配置
+          python3 ../gen_config.py
           ./sing-box run -c config.json &
           sleep 5
           echo "✅ 代理已启动"
@@ -36,7 +36,8 @@ jobs:
           NODE_LINK: ${{ secrets.NODE_LINK }}
 
       - name: Run renewal
-        run: xvfb-run --auto-servernum python renew.py
+        run: |
+          xvfb-run --auto-servernum python renew.py
         env:
           ACCOUNTS_JSON: ${{ secrets.ACCOUNTS_JSON }}
           HEADLESS: "true"
