@@ -11,38 +11,192 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: ⚙ 设置 Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: Install dependencies
+      - name: 🛠️ 安装系统依赖和 Python 依赖
         run: |
-          pip install -r requirements.txt
           sudo apt-get update
-          sudo apt-get install -y ffmpeg xvfb chromium-browser
+          sudo apt-get install -y xvfb x11-utils wget net-tools jq chromium-browser ffmpeg
+          pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: Start sing-box proxy (if NODE_LINK provided)
+      - name: 🔗 配置代理（sing-box）
         if: env.NODE_LINK != ''
-        run: |
-          wget -q https://github.com/SagerNet/sing-box/releases/download/v1.13.16/sing-box-1.13.16-linux-amd64-glibc.tar.gz
-          tar -xzf sing-box-*.tar.gz
-          cd sing-box-*-linux-amd64-glibc
-          python3 ../gen_config.py
-          ./sing-box run -c config.json &
-          sleep 5
-          echo "✅ 代理已启动 (127.0.0.1:1080)"
         env:
           NODE_LINK: ${{ secrets.NODE_LINK }}
-
-      - name: Run renewal script
         run: |
-          xvfb-run --auto-servernum python renew.py
+          set -e
+          echo "⬇️ 下载 sing-box 二进制..."
+          LATEST_URL=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | \
+            grep -o '"browser_download_url": "[^"]*linux-amd64[^"]*"' | \
+            grep -v 'alpha\|beta\|rc' | head -1 | sed 's/"browser_download_url": "//' | sed 's/"//')
+          if [ -z "$LATEST_URL" ]; then echo "❌ 无法获取下载链接"; exit 1; fi
+          echo "📥 下载地址: $LATEST_URL"
+          for i in {1..3}; do
+            echo "尝试 $i/3..."
+            curl -L -o sing-box.tar.gz "$LATEST_URL" --connect-timeout 30 --max-time 60
+            if [ -f sing-box.tar.gz ] && file sing-box.tar.gz | grep -q 'gzip compressed data'; then
+              echo "✅ 下载成功"; break
+            fi
+            echo "⚠️ 重试..."; rm -f sing-box.tar.gz; sleep 3
+          done
+          [ -f sing-box.tar.gz ] || { echo "❌ 下载失败，跳过代理"; exit 0; }
+          tar -xzf sing-box.tar.gz
+          SING_BOX_DIR=$(find . -maxdepth 1 -type d -name "sing-box-*" | head -1)
+          [ -z "$SING_BOX_DIR" ] && { echo "❌ 解压失败"; exit 1; }
+          sudo mv "$SING_BOX_DIR/sing-box" /usr/local/bin/
+          sudo chmod +x /usr/local/bin/sing-box
+          rm -rf sing-box.tar.gz "$SING_BOX_DIR"
+          sing-box version
+
+          echo "📝 解析 vless 链接并生成配置文件..."
+          # 内联 Python 解析 VLESS（参考您的示例）
+          python3 << 'PYEOF'
+          import json, sys, os, re
+          from urllib.parse import urlparse, parse_qs
+
+          link = os.environ.get('NODE_LINK', '')
+          if not link:
+              sys.exit(0)
+
+          parsed = urlparse(link)
+          if parsed.scheme != 'vless':
+              sys.exit(0)
+
+          netloc = parsed.netloc
+          if '@' in netloc:
+              uuid, host_port = netloc.split('@', 1)
+          else:
+              uuid, host_port = '', netloc
+
+          host = ''
+          port = '443'
+          # 处理 IPv6 地址
+          bracket_match = re.match(r'^\[([^\]]+)\](?::(\d+))?$', host_port)
+          if bracket_match:
+              host = bracket_match.group(1)
+              if bracket_match.group(2):
+                  port = bracket_match.group(2)
+          else:
+              if host_port.count(':') > 1:
+                  host = host_port
+              else:
+                  if ':' in host_port:
+                      host, port = host_port.split(':', 1)
+                  else:
+                      host = host_port
+
+          if not host:
+              print(f"❌ 无法解析主机地址: {host_port}")
+              sys.exit(1)
+
+          params = parse_qs(parsed.query)
+          sni = params.get('sni', [''])[0] or host
+          fp = params.get('fp', [''])[0] or 'chrome'
+          flow = params.get('flow', [''])[0] or 'xtls-rprx-vision'
+          type_ = params.get('type', ['tcp'])[0]
+          security = params.get('security', [''])[0]
+          path = params.get('path', [''])[0]
+          host_header = params.get('host', [''])[0] or host
+
+          outbound = {
+              "type": "vless",
+              "tag": "vless-out",
+              "server": host,
+              "server_port": int(port),
+              "uuid": uuid,
+              "flow": flow,
+              "packet_encoding": "packetaddr",
+          }
+
+          # TLS 基础配置
+          if security.lower() != 'none':
+              outbound["tls"] = {
+                  "enabled": True,
+                  "server_name": sni,
+                  "insecure": False,
+                  "utls": {"enabled": True, "fingerprint": fp}
+              }
+
+          # 传输层配置
+          if type_ != 'tcp':
+              transport = {"type": type_}
+              if type_ == 'ws':
+                  transport["path"] = path or "/"
+                  transport["headers"] = {"Host": host_header}
+              elif type_ == 'grpc':
+                  transport["service_name"] = path or ""
+              outbound["transport"] = transport
+
+          # Reality 特殊配置
+          if security == 'reality':
+              pbk = params.get('pbk', [''])[0]
+              sid = params.get('sid', [''])[0]
+              outbound['tls']['reality'] = {
+                  "enabled": True,
+                  "public_key": pbk,
+                  "short_id": sid
+              }
+
+          config = {
+              "log": {"level": "warn"},
+              "inbounds": [
+                  {
+                      "type": "socks",
+                      "tag": "socks-in",
+                      "listen": "127.0.0.1",
+                      "listen_port": 1080
+                  }
+              ],
+              "outbounds": [outbound],
+              "route": {
+                  "rules": [
+                      {"outbound": "vless-out", "protocol": ["tcp", "udp"]}
+                  ]
+              }
+          }
+
+          with open("sing-box-config.json", "w") as f:
+              json.dump(config, f, indent=2)
+          print("✅ sing-box-config.json 已生成")
+          PYEOF
+
+          if [ -f sing-box-config.json ]; then
+            echo "🚀 启动 sing-box..."
+            nohup sing-box -c sing-box-config.json run > sing-box.log 2>&1 &
+            sleep 5
+            if netstat -tuln | grep -q ':1080'; then
+              echo "✅ 代理已启动（127.0.0.1:1080）"
+            else
+              echo "❌ 代理启动失败，查看日志："
+              cat sing-box.log
+              exit 1
+            fi
+          else
+            echo "⚠️ 未生成配置文件，跳过代理"
+          fi
+
+      - name: 🚀 运行续期脚本
         env:
           ACCOUNTS_JSON: ${{ secrets.ACCOUNTS_JSON }}
           HEADLESS: "true"
-          # 如果有备用语音识别 API，可设置
-          # AUDIO_API_URL: ${{ secrets.AUDIO_API_URL }}
+          PROXY_SERVER: ${{ env.NODE_LINK != '' && 'socks5://127.0.0.1:1080' || '' }}
+        run: |
+          if [ -n "$PROXY_SERVER" ]; then
+            echo "🔗 已启用代理: $PROXY_SERVER"
+          else
+            echo "🍭 未启用代理，直连访问"
+          fi
+          xvfb-run --auto-servernum python renew.py
+
+      - name: 🧽 清理进程
+        if: always()
+        run: |
+          pkill -f sing-box || true
+          pkill -f chromium || true
+          pkill -f Xvfb || true
