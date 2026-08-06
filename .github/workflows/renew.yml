@@ -2,8 +2,8 @@ name: HAX Auto Renew
 
 on:
   schedule:
-    - cron: '0 0 * * *'          # 每天 UTC 00:00（北京时间 08:00）
-  workflow_dispatch:             # 允许手动触发
+    - cron: '0 0 * * *'
+  workflow_dispatch:
 
 jobs:
   renew:
@@ -26,7 +26,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: 🔗 配置代理（sing-box）
-        if: env.NODE_LINK != ''
+        if: secrets.NODE_LINK != ''
         env:
           NODE_LINK: ${{ secrets.NODE_LINK }}
         run: |
@@ -55,28 +55,20 @@ jobs:
           sing-box version
 
           echo "📝 解析 vless 链接并生成配置文件..."
-          # 内联 Python 解析 VLESS（参考您的示例）
           python3 << 'PYEOF'
           import json, sys, os, re
           from urllib.parse import urlparse, parse_qs
-
           link = os.environ.get('NODE_LINK', '')
-          if not link:
-              sys.exit(0)
-
+          if not link: sys.exit(0)
           parsed = urlparse(link)
-          if parsed.scheme != 'vless':
-              sys.exit(0)
-
+          if parsed.scheme != 'vless': sys.exit(0)
           netloc = parsed.netloc
           if '@' in netloc:
               uuid, host_port = netloc.split('@', 1)
           else:
               uuid, host_port = '', netloc
-
           host = ''
           port = '443'
-          # 处理 IPv6 地址
           bracket_match = re.match(r'^\[([^\]]+)\](?::(\d+))?$', host_port)
           if bracket_match:
               host = bracket_match.group(1)
@@ -90,11 +82,9 @@ jobs:
                       host, port = host_port.split(':', 1)
                   else:
                       host = host_port
-
           if not host:
               print(f"❌ 无法解析主机地址: {host_port}")
               sys.exit(1)
-
           params = parse_qs(parsed.query)
           sni = params.get('sni', [''])[0] or host
           fp = params.get('fp', [''])[0] or 'chrome'
@@ -103,7 +93,6 @@ jobs:
           security = params.get('security', [''])[0]
           path = params.get('path', [''])[0]
           host_header = params.get('host', [''])[0] or host
-
           outbound = {
               "type": "vless",
               "tag": "vless-out",
@@ -113,8 +102,6 @@ jobs:
               "flow": flow,
               "packet_encoding": "packetaddr",
           }
-
-          # TLS 基础配置
           if security.lower() != 'none':
               outbound["tls"] = {
                   "enabled": True,
@@ -122,8 +109,6 @@ jobs:
                   "insecure": False,
                   "utls": {"enabled": True, "fingerprint": fp}
               }
-
-          # 传输层配置
           if type_ != 'tcp':
               transport = {"type": type_}
               if type_ == 'ws':
@@ -132,8 +117,6 @@ jobs:
               elif type_ == 'grpc':
                   transport["service_name"] = path or ""
               outbound["transport"] = transport
-
-          # Reality 特殊配置
           if security == 'reality':
               pbk = params.get('pbk', [''])[0]
               sid = params.get('sid', [''])[0]
@@ -142,7 +125,6 @@ jobs:
                   "public_key": pbk,
                   "short_id": sid
               }
-
           config = {
               "log": {"level": "warn"},
               "inbounds": [
@@ -160,7 +142,6 @@ jobs:
                   ]
               }
           }
-
           with open("sing-box-config.json", "w") as f:
               json.dump(config, f, indent=2)
           print("✅ sing-box-config.json 已生成")
@@ -185,7 +166,8 @@ jobs:
         env:
           ACCOUNTS_JSON: ${{ secrets.ACCOUNTS_JSON }}
           HEADLESS: "true"
-          PROXY_SERVER: ${{ env.NODE_LINK != '' && 'socks5://127.0.0.1:1080' || '' }}
+          # 如果 NODE_LINK 存在则设置代理，否则为空
+          PROXY_SERVER: ${{ secrets.NODE_LINK != '' && 'socks5://127.0.0.1:1080' || '' }}
         run: |
           if [ -n "$PROXY_SERVER" ]; then
             echo "🔗 已启用代理: $PROXY_SERVER"
