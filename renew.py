@@ -4,7 +4,7 @@
 HAX VPS Auto-Renewal
 - Cookie 快速登录（session_token 或 PHPSESSID）
 - 若 Cookie 失效，自动回退 Telegram OAuth 登录
-- 代理自动检测（socks5://127.0.0.1:1080，不通则直连）
+- 代理自动检测 + 出口 IP 验证（确保代理生效）
 - 算术验证码 + 音频 reCAPTCHA 识别
 - 多 Bot 轮询获取续期码
 - Telegram 通知
@@ -19,6 +19,7 @@ import base64
 import html
 import tempfile
 import random
+import socket
 from datetime import datetime, timezone, timedelta
 
 import requests
@@ -42,18 +43,52 @@ PROXY_ADDR = os.getenv("PROXY_SERVER", "socks5://127.0.0.1:1080")
 CODE_FILE = "renewal_code.txt"
 TG_RENEWAL_PATTERN = re.compile(r'[A-Za-z0-9+/=]{32,}')
 
-# ===================== 代理检测 =====================
+# ===================== 代理检测与出口 IP 验证 =====================
+def is_port_open(host, port):
+    """检查端口是否可连接"""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(3)
+        result = sock.connect_ex((host, port))
+        sock.close()
+        return result == 0
+    except:
+        return False
+
 def get_proxies():
     """返回代理字典，若代理不可用则返回 None（直连）"""
     if not PROXY_ADDR:
         return None
-    try:
+    # 检查本地端口 1080 是否监听（适用于 sing-box）
+    if is_port_open('127.0.0.1', 1080):
         proxies = {"http": PROXY_ADDR, "https": PROXY_ADDR}
-        # 用 google.com 检测连通性
-        requests.get("https://www.google.com", proxies=proxies, timeout=5)
         return proxies
-    except Exception:
-        return None
+    return None
+
+def check_proxy_ip(proxies):
+    """
+    通过代理获取出口 IP，验证代理是否真正生效
+    返回 (成功, IP字符串)
+    """
+    if not proxies:
+        return False, None
+    # 尝试多个 IP 查询服务
+    services = [
+        'https://api.ipify.org?format=json',
+        'https://ip.sb/json',
+        'https://httpbin.org/ip'
+    ]
+    for url in services:
+        try:
+            resp = requests.get(url, proxies=proxies, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                ip = data.get('ip') or data.get('origin')
+                if ip:
+                    return True, ip
+        except:
+            continue
+    return False, None
 
 # ===================== 工具函数 =====================
 def get_beijing_time():
@@ -62,14 +97,13 @@ def get_beijing_time():
 def send_telegram_message(text, bot_token, chat_id):
     if not bot_token or not chat_id:
         return False
-    proxies = get_proxies()  # 自动检测代理
+    proxies = get_proxies()
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     try:
         resp = requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
                              timeout=10, proxies=proxies)
         return resp.json().get("ok", False)
     except Exception:
-        # 代理失效则直连重试
         try:
             resp = requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"}, timeout=10)
             return resp.json().get("ok", False)
@@ -86,14 +120,11 @@ def notify_failed(phone, step, error, bot_token, chat_id):
 
 # ===================== Telegram OAuth 登录（回退方案） =====================
 def login_with_telegram(page, phone):
-    """使用 Telegram OAuth 登录 HAX，返回是否成功"""
     print(f"  [LOGIN] 尝试 Telegram OAuth 登录: {phone}")
     try:
         page.get("https://hax.co.id/login")
         page.wait.doc_loaded(timeout=20)
         page.wait(5)
-
-        # 切换至 Telegram OAuth iframe
         iframe_xpath = "xpath://iframe[contains(@src, 'oauth.telegram.org')]"
         with page.with_frame(iframe_xpath) as frame_page:
             btn = frame_page.ele("css:button.tgme_widget_login_button")
@@ -102,8 +133,6 @@ def login_with_telegram(page, phone):
             btn.click_self()
             print("  [LOGIN] 点击 Telegram 登录按钮")
             page.wait(3)
-
-            # 查找 OAuth 标签页
             oauth_tab_id = None
             for tab_id in page.tab_ids:
                 tab = page.get_tab(tab_id)
@@ -112,41 +141,31 @@ def login_with_telegram(page, phone):
                     break
             if not oauth_tab_id:
                 raise RuntimeError("未找到 OAuth tab")
-
             oauth_page = page.get_tab(oauth_tab_id)
             oauth_page.activate()
             oauth_page.wait.doc_loaded(timeout=20)
-            print(f"  [LOGIN] OAuth URL: {oauth_page.url}")
-
-            # 输入手机号
             phone_input = oauth_page.ele("css:#login-phone-code")
             if not phone_input:
                 raise RuntimeError("未找到手机号输入框")
             phone_input.input(phone, clear=True)
             print(f"  [LOGIN] 输入手机号: {phone}")
             page.wait(2)
-
-            # 点击继续
             continue_btn = oauth_page.ele("text:继续") or oauth_page.ele("css:button[type=submit]") or oauth_page.ele("css:button")
             if continue_btn:
                 continue_btn.click_self()
                 print("  [LOGIN] 点击继续")
-
-            # 等待跳转回 vps-info
             for _ in range(60):
                 page.wait(2)
                 if "hax.co.id/vps-info" in (page.url or ""):
                     print("  [LOGIN] 已跳转到 VPS 信息页")
                     return True
             raise RuntimeError("登录超时，未跳转到 VPS 信息页")
-
     except Exception as e:
         print(f"  [LOGIN] 失败: {e}")
         return False
 
 # ===================== 续期码获取（多 Bot 轮询） =====================
 def get_renewal_code_from_telegram(bot_tokens, timeout=1800, poll_interval=10):
-    """从多个 Bot 中轮询获取 Base64 续期码，返回 (code, source_label)"""
     offsets = {}
     for bt in bot_tokens:
         try:
@@ -160,8 +179,8 @@ def get_renewal_code_from_telegram(bot_tokens, timeout=1800, poll_interval=10):
                 offsets[bt['token']] = 0
         except Exception:
             offsets[bt['token']] = 0
-
     elapsed = 0
+    code = ""
     while elapsed < timeout:
         for bt in bot_tokens:
             offset = offsets.get(bt['token'], 0)
@@ -461,7 +480,7 @@ def solve_arithmetic_captcha(page):
 # ===================== 单账号续期主流程 =====================
 def renew_account(account):
     phone = account.get("phone")
-    session_token = account.get("session_token")   # 可选
+    session_token = account.get("session_token")
     bot_token = account.get("bot_token")
     chat_id = account.get("chat_id")
 
@@ -471,15 +490,21 @@ def renew_account(account):
 
     print(f"\n{'='*60}\n  续期: {phone}\n{'='*60}")
 
+    # ---------- 代理检测与出口 IP 验证 ----------
     proxies = get_proxies()
     if proxies:
-        print(f"🔗 代理可用: {PROXY_ADDR}")
+        print(f"🔗 代理地址: {PROXY_ADDR}")
+        ok, ip = check_proxy_ip(proxies)
+        if ok:
+            print(f"📍 代理出口 IP: {ip}")
+        else:
+            print("⚠️ 代理出口 IP 获取失败，代理可能未生效，将使用直连")
+            proxies = None  # 降级为直连
     else:
         print("🔗 代理不可用，使用直连")
 
     page = None
     try:
-        # ---------- 浏览器配置 ----------
         co = ChromiumOptions()
         if HEADLESS:
             co.headless(True)
@@ -487,12 +512,9 @@ def renew_account(account):
             co.set_argument('--disable-dev-shm-usage')
             co.set_argument('--disable-gpu')
             co.set_argument('--headless=new')
-        # 不手动设置本地端口，让 DrissionPage 自动分配
         if proxies is not None:
             co.set_proxy(PROXY_ADDR)
         co.set_user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-        # 不指定浏览器路径，让 DrissionPage 自动查找（它会尝试 chromium-browser）
-        # co.set_browser_path('/usr/bin/chromium-browser')  # 如果自动找不到可取消注释
         page = ChromiumPage(co)
 
         # ---------- 尝试 Cookie 登录 ----------
@@ -500,8 +522,8 @@ def renew_account(account):
         if session_token:
             print("  [LOGIN] 尝试使用 session_token 快速登录...")
             page.get("https://hax.co.id/login")
-            # 注入 PHPSESSID（HAX 网站使用此名称）
-            page.set_cookies([{"name": "PHPSESSID", "value": session_token, "domain": "hax.co.id"}])
+            # 新版 DrissionPage 使用 cookies.set
+            page.cookies.set({"PHPSESSID": session_token, "domain": "hax.co.id"})
             page.get("https://hax.co.id/vps-info")
             page.wait.doc_loaded(timeout=15)
             if "login" not in page.url.lower():
@@ -510,14 +532,12 @@ def renew_account(account):
             else:
                 print("  ⚠️ Cookie 无效或已过期")
 
-        # ---------- 若 Cookie 失败，执行 Telegram OAuth 登录 ----------
         if not login_success:
             print("  [LOGIN] 执行 Telegram OAuth 登录...")
             login_success = login_with_telegram(page, phone)
             if not login_success:
                 raise RuntimeError("Telegram 登录失败")
 
-        # 此时 page 应位于 vps-info 页面
         print("  ✅ 登录成功，开始续期流程")
 
         # ---------- 处理广告 ----------
@@ -561,7 +581,6 @@ def renew_account(account):
 
         # ---------- 获取续期码 ----------
         print("  [CODE] 等待 @HaxTG_bot 发送续期码...")
-        # 收集所有 Bot Token（去重）
         all_bots = []
         seen = set()
         for acc in ACCOUNTS:
@@ -569,7 +588,6 @@ def renew_account(account):
             if t and t not in seen:
                 seen.add(t)
                 all_bots.append({"token": t, "label": f"...{t[-6:]}"})
-        # 确保当前账号的 Bot 在列表中
         if bot_token and bot_token not in seen:
             all_bots.insert(0, {"token": bot_token, "label": f"...{bot_token[-6:]}"})
 
@@ -577,7 +595,6 @@ def renew_account(account):
         if not code:
             raise RuntimeError("未获取到续期码")
 
-        # Base64 解码
         try:
             decoded = base64.b64decode(code).decode('utf-8')
             print(f"  [CODE] 解码后: {decoded[:20]}***")
