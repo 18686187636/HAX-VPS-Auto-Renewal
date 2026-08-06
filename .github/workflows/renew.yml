@@ -21,7 +21,7 @@ jobs:
       - name: 🛠️ 安装系统依赖和 Python 依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb x11-utils wget net-tools jq chromium-browser ffmpeg
+          sudo apt-get install -y xvfb x11-utils wget net-tools jq chromium-browser ffmpeg curl
           pip install --upgrade pip
           pip install -r requirements.txt
 
@@ -54,7 +54,7 @@ jobs:
           rm -rf sing-box.tar.gz "$SING_BOX_DIR"
           sing-box version
 
-          echo "📝 解析 vless 链接并生成配置文件..."
+          echo "📝 解析 vless 链接并生成配置文件（含 DNS）..."
           python3 << 'PYEOF'
           import json, sys, os, re
           from urllib.parse import urlparse, parse_qs
@@ -127,24 +127,40 @@ jobs:
               }
           config = {
               "log": {"level": "warn"},
+              "dns": {
+                  "servers": [
+                      {"tag": "proxy", "address": "https://1.1.1.1/dns-query"},
+                      {"tag": "local", "address": "223.5.5.5"}
+                  ],
+                  "rules": [
+                      {"outbound": "any", "server": "proxy"}
+                  ]
+              },
               "inbounds": [
                   {
                       "type": "socks",
                       "tag": "socks-in",
                       "listen": "127.0.0.1",
                       "listen_port": 1080
+                  },
+                  {
+                      "type": "http",
+                      "tag": "http-in",
+                      "listen": "127.0.0.1",
+                      "listen_port": 1081
                   }
               ],
               "outbounds": [outbound],
               "route": {
                   "rules": [
-                      {"outbound": "vless-out", "protocol": ["tcp", "udp"]}
+                      {"outbound": "vless-out", "protocol": ["tcp", "udp"]},
+                      {"outbound": "vless-out", "type": "dns"}
                   ]
               }
           }
           with open("sing-box-config.json", "w") as f:
               json.dump(config, f, indent=2)
-          print("✅ sing-box-config.json 已生成")
+          print("✅ sing-box-config.json 已生成（含 DNS 和 HTTP 代理）")
           PYEOF
 
           if [ -f sing-box-config.json ]; then
@@ -152,7 +168,8 @@ jobs:
             nohup sing-box -c sing-box-config.json run > sing-box.log 2>&1 &
             sleep 5
             if netstat -tuln | grep -q ':1080'; then
-              echo "✅ 代理已启动（127.0.0.1:1080）"
+              echo "✅ SOCKS5 代理已启动（127.0.0.1:1080）"
+              echo "✅ HTTP 代理已启动（127.0.0.1:1081）"
             else
               echo "❌ 代理启动失败，查看日志："
               cat sing-box.log
@@ -162,15 +179,21 @@ jobs:
             echo "⚠️ 未生成配置文件，跳过代理"
           fi
 
+      - name: 📋 打印 sing-box 日志（调试）
+        if: always()
+        run: cat sing-box.log || true
+
       - name: 🚀 运行续期脚本
         env:
           ACCOUNTS_JSON: ${{ secrets.ACCOUNTS_JSON }}
           HEADLESS: "true"
-          # 如果 NODE_LINK 存在则设置代理，否则为空
-          PROXY_SERVER: ${{ secrets.NODE_LINK != '' && 'socks5://127.0.0.1:1080' || '' }}
+          # 优先使用 HTTP 代理（更兼容），若不可用则回退 SOCKS5
+          PROXY_SERVER: ${{ secrets.NODE_LINK != '' && 'http://127.0.0.1:1081' || '' }}
         run: |
           if [ -n "$PROXY_SERVER" ]; then
             echo "🔗 已启用代理: $PROXY_SERVER"
+            # 额外用 curl 测试代理（日志可见）
+            curl -x "$PROXY_SERVER" -s https://api.ipify.org && echo " ✅ 代理 curl 测试成功" || echo " ⚠️ curl 代理测试失败"
           else
             echo "🍭 未启用代理，直连访问"
           fi
