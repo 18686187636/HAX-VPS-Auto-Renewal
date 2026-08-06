@@ -3,7 +3,7 @@
 """
 HAX VPS Auto-Renewal
 - Cookie 快速登录（通过 JS 注入 PHPSESSID）
-- 若 Cookie 失效，自动回退 Telegram OAuth 登录（使用 find_frame + set_active）
+- 若 Cookie 失效，自动回退 Telegram OAuth 登录（使用 set_active）
 - 代理自动检测 + 出口 IP 验证
 - 算术验证码 + 音频 reCAPTCHA 识别
 - 多 Bot 轮询获取续期码
@@ -141,10 +141,10 @@ def login_with_telegram(page, phone):
         page.wait(3)
 
         # 查找新打开的 OAuth 标签页
-        original_tab = page.tab
+        original_tab_id = page.tab_id
         oauth_tab_id = None
         for tab_id in page.tab_ids:
-            if tab_id == original_tab.id:
+            if tab_id == original_tab_id:
                 continue
             tab = page.get_tab(tab_id)
             if "oauth.telegram.org" in (tab.url or ""):
@@ -173,7 +173,7 @@ def login_with_telegram(page, phone):
             print("  [LOGIN] 点击继续")
 
         # 切回主标签页
-        original_tab.set_active()
+        page.get_tab(original_tab_id).set_active()
 
         # 等待主标签页跳转回 vps-info
         for _ in range(60):
