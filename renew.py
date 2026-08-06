@@ -3,7 +3,7 @@
 """
 HAX VPS Auto-Renewal
 - Cookie 快速登录（通过 JS 注入 PHPSESSID）
-- 若 Cookie 失效，自动回退 Telegram OAuth 登录（使用 set_active）
+- 若 Cookie 失效，自动回退 Telegram OAuth 登录（使用 page.tab 切换标签页）
 - 代理自动检测 + 出口 IP 验证
 - 算术验证码 + 音频 reCAPTCHA 识别
 - 多 Bot 轮询获取续期码
@@ -118,9 +118,9 @@ def find_frame_by_keyword(page, keyword):
         pass
     return None
 
-# ===================== Telegram OAuth 登录（使用 set_active） =====================
+# ===================== Telegram OAuth 登录（使用 page.tab 切换标签页） =====================
 def login_with_telegram(page, phone):
-    """使用 Telegram OAuth 登录 HAX，通过 find_frame_by_keyword + set_active 切换标签页"""
+    """使用 Telegram OAuth 登录 HAX，通过 page.tab 切换标签页"""
     print(f"  [LOGIN] 尝试 Telegram OAuth 登录: {phone}")
     try:
         page.get("https://hax.co.id/login")
@@ -140,26 +140,30 @@ def login_with_telegram(page, phone):
         print("  [LOGIN] 点击 Telegram 登录按钮")
         page.wait(3)
 
-        # 查找新打开的 OAuth 标签页
-        original_tab_id = page.tab_id
-        oauth_tab_id = None
-        for tab_id in page.tab_ids:
-            if tab_id == original_tab_id:
-                continue
-            tab = page.get_tab(tab_id)
-            if "oauth.telegram.org" in (tab.url or ""):
-                oauth_tab_id = tab_id
+        # 获取当前标签页
+        original_tab = page.tab
+        # 查找新标签页
+        oauth_tab = None
+        for t in page.tabs:
+            if t != original_tab and "oauth.telegram.org" in t.url:
+                oauth_tab = t
                 break
-        if not oauth_tab_id:
+        if not oauth_tab:
+            # 可能还没加载，再等一会
+            time.sleep(2)
+            for t in page.tabs:
+                if t != original_tab and "oauth.telegram.org" in t.url:
+                    oauth_tab = t
+                    break
+        if not oauth_tab:
             raise RuntimeError("未找到 OAuth tab")
 
-        # 切换到 OAuth 标签页（使用 set_active）
-        oauth_tab = page.get_tab(oauth_tab_id)
-        oauth_tab.set_active()
-        oauth_tab.wait.doc_loaded(timeout=20)
+        # 切换到新标签页
+        page.tab = oauth_tab
+        page.wait.doc_loaded(timeout=20)
 
         # 输入手机号
-        phone_input = oauth_tab.ele("css:#login-phone-code", timeout=5)
+        phone_input = page.ele("css:#login-phone-code", timeout=5)
         if not phone_input:
             raise RuntimeError("未找到手机号输入框")
         phone_input.input(phone, clear=True)
@@ -167,13 +171,13 @@ def login_with_telegram(page, phone):
         time.sleep(2)
 
         # 点击继续
-        continue_btn = oauth_tab.ele("text:继续") or oauth_tab.ele("css:button[type=submit]") or oauth_tab.ele("css:button")
+        continue_btn = page.ele("text:继续") or page.ele("css:button[type=submit]") or page.ele("css:button")
         if continue_btn:
             continue_btn.click()
             print("  [LOGIN] 点击继续")
 
         # 切回主标签页
-        page.get_tab(original_tab_id).set_active()
+        page.tab = original_tab
 
         # 等待主标签页跳转回 vps-info
         for _ in range(60):
