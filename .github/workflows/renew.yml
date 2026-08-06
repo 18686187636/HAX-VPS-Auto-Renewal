@@ -26,7 +26,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: 🔗 配置代理（sing-box）
-        if: secrets.NODE_LINK != ''
+        if: env.NODE_LINK != ''
         env:
           NODE_LINK: ${{ secrets.NODE_LINK }}
         run: |
