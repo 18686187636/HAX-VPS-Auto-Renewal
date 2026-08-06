@@ -2,8 +2,8 @@ name: HAX Auto Renew
 
 on:
   schedule:
-    - cron: '0 0 * * *'
-  workflow_dispatch:
+    - cron: '0 0 * * *'          # 每天 UTC 00:00（北京时间 08:00）
+  workflow_dispatch:             # 允许手动触发
 
 jobs:
   renew:
@@ -11,15 +11,19 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          sudo apt-get update && sudo apt-get install -y ffmpeg xvfb
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg xvfb chromium-browser
 
       - name: Start sing-box proxy (if NODE_LINK provided)
         if: env.NODE_LINK != ''
@@ -27,17 +31,18 @@ jobs:
           wget -q https://github.com/SagerNet/sing-box/releases/download/v1.13.16/sing-box-1.13.16-linux-amd64-glibc.tar.gz
           tar -xzf sing-box-*.tar.gz
           cd sing-box-*-linux-amd64-glibc
-          # 动态生成配置
           python3 ../gen_config.py
           ./sing-box run -c config.json &
           sleep 5
-          echo "✅ 代理已启动"
+          echo "✅ 代理已启动 (127.0.0.1:1080)"
         env:
           NODE_LINK: ${{ secrets.NODE_LINK }}
 
-      - name: Run renewal
+      - name: Run renewal script
         run: |
           xvfb-run --auto-servernum python renew.py
         env:
           ACCOUNTS_JSON: ${{ secrets.ACCOUNTS_JSON }}
           HEADLESS: "true"
+          # 如果有备用语音识别 API，可设置
+          # AUDIO_API_URL: ${{ secrets.AUDIO_API_URL }}
