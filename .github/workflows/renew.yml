@@ -29,6 +29,7 @@ jobs:
         if: env.NODE_LINK != ''
         env:
           NODE_LINK: ${{ secrets.NODE_LINK }}
+          ENABLE_DEPRECATED_LEGACY_DNS_SERVERS: true   # ✅ 允许旧版 DNS 格式
         run: |
           set -e
           echo "⬇️ 下载 sing-box 二进制..."
@@ -54,7 +55,7 @@ jobs:
           rm -rf sing-box.tar.gz "$SING_BOX_DIR"
           sing-box version
 
-          echo "📝 解析 vless 链接并生成配置文件（含 DNS）..."
+          echo "📝 解析 vless 链接并生成配置文件（含 DNS 和 HTTP 代理）..."
           python3 << 'PYEOF'
           import json, sys, os, re
           from urllib.parse import urlparse, parse_qs
@@ -160,12 +161,13 @@ jobs:
           }
           with open("sing-box-config.json", "w") as f:
               json.dump(config, f, indent=2)
-          print("✅ sing-box-config.json 已生成（含 DNS 和 HTTP 代理）")
+          print("✅ sing-box-config.json 已生成")
           PYEOF
 
           if [ -f sing-box-config.json ]; then
             echo "🚀 启动 sing-box..."
-            nohup sing-box -c sing-box-config.json run > sing-box.log 2>&1 &
+            # ✅ 启动时再次确保环境变量生效
+            ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true nohup sing-box -c sing-box-config.json run > sing-box.log 2>&1 &
             sleep 5
             if netstat -tuln | grep -q ':1080'; then
               echo "✅ SOCKS5 代理已启动（127.0.0.1:1080）"
@@ -193,7 +195,8 @@ jobs:
           if [ -n "$PROXY_SERVER" ]; then
             echo "🔗 已启用代理: $PROXY_SERVER"
             # 额外用 curl 测试代理（日志可见）
-            curl -x "$PROXY_SERVER" -s https://api.ipify.org && echo " ✅ 代理 curl 测试成功" || echo " ⚠️ curl 代理测试失败"
+            echo "🧪 测试代理连通性..."
+            curl -x "$PROXY_SERVER" -s https://api.ipify.org && echo " ✅ curl 代理测试成功" || echo " ⚠️ curl 代理测试失败"
           else
             echo "🍭 未启用代理，直连访问"
           fi
