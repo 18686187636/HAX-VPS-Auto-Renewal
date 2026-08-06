@@ -29,7 +29,6 @@ jobs:
         if: env.NODE_LINK != ''
         env:
           NODE_LINK: ${{ secrets.NODE_LINK }}
-          ENABLE_DEPRECATED_LEGACY_DNS_SERVERS: true   # ✅ 允许旧版 DNS 格式
         run: |
           set -e
           echo "⬇️ 下载 sing-box 二进制..."
@@ -55,7 +54,7 @@ jobs:
           rm -rf sing-box.tar.gz "$SING_BOX_DIR"
           sing-box version
 
-          echo "📝 解析 vless 链接并生成配置文件（含 DNS 和 HTTP 代理）..."
+          echo "📝 解析 vless 链接并生成配置文件..."
           python3 << 'PYEOF'
           import json, sys, os, re
           from urllib.parse import urlparse, parse_qs
@@ -126,17 +125,9 @@ jobs:
                   "public_key": pbk,
                   "short_id": sid
               }
+          # ✅ 移除 dns 配置，避免版本兼容问题
           config = {
               "log": {"level": "warn"},
-              "dns": {
-                  "servers": [
-                      {"tag": "proxy", "address": "https://1.1.1.1/dns-query"},
-                      {"tag": "local", "address": "223.5.5.5"}
-                  ],
-                  "rules": [
-                      {"outbound": "any", "server": "proxy"}
-                  ]
-              },
               "inbounds": [
                   {
                       "type": "socks",
@@ -154,8 +145,7 @@ jobs:
               "outbounds": [outbound],
               "route": {
                   "rules": [
-                      {"outbound": "vless-out", "protocol": ["tcp", "udp"]},
-                      {"outbound": "vless-out", "type": "dns"}
+                      {"outbound": "vless-out", "protocol": ["tcp", "udp"]}
                   ]
               }
           }
@@ -166,8 +156,7 @@ jobs:
 
           if [ -f sing-box-config.json ]; then
             echo "🚀 启动 sing-box..."
-            # ✅ 启动时再次确保环境变量生效
-            ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true nohup sing-box -c sing-box-config.json run > sing-box.log 2>&1 &
+            nohup sing-box -c sing-box-config.json run > sing-box.log 2>&1 &
             sleep 5
             if netstat -tuln | grep -q ':1080'; then
               echo "✅ SOCKS5 代理已启动（127.0.0.1:1080）"
@@ -194,7 +183,6 @@ jobs:
         run: |
           if [ -n "$PROXY_SERVER" ]; then
             echo "🔗 已启用代理: $PROXY_SERVER"
-            # 额外用 curl 测试代理（日志可见）
             echo "🧪 测试代理连通性..."
             curl -x "$PROXY_SERVER" -s https://api.ipify.org && echo " ✅ curl 代理测试成功" || echo " ⚠️ curl 代理测试失败"
           else
