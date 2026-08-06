@@ -37,8 +37,8 @@ ACCOUNTS_JSON = os.getenv("ACCOUNTS_JSON", "[]")
 ACCOUNTS = json.loads(ACCOUNTS_JSON)
 HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
 
-# 固定代理地址（sing-box 默认监听）
-PROXY_ADDR = "socks5://127.0.0.1:1080"
+# 代理地址（优先从环境变量读取，若未设置则使用默认）
+PROXY_ADDR = os.getenv("PROXY_SERVER", "socks5://127.0.0.1:1080")
 CODE_FILE = "renewal_code.txt"
 TG_RENEWAL_PATTERN = re.compile(r'[A-Za-z0-9+/=]{32,}')
 
@@ -485,12 +485,13 @@ def renew_account(account):
             co.set_argument('--disable-dev-shm-usage')
             co.set_argument('--disable-gpu')
             co.set_argument('--headless=new')
-        co.auto_port()   # 避免端口冲突
+        # 使用随机端口避免冲突
+        co.set_local_port(0)
         if proxies is not None:
             co.set_proxy(PROXY_ADDR)
         co.set_user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-        # 若系统 chromium 不在 PATH，可指定路径（通常 ubuntu 安装后可用）
-        # co.set_browser_path('/usr/bin/chromium-browser')
+        # 设置 Chromium 路径（GitHub Actions 中安装的 chromium-browser）
+        co.set_browser_path('/usr/bin/chromium-browser')
         page = ChromiumPage(co)
 
         # ---------- 尝试 Cookie 登录 ----------
