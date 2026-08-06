@@ -59,8 +59,8 @@ def get_proxies():
     """返回代理字典，若代理不可用则返回 None（直连）"""
     if not PROXY_ADDR:
         return None
-    # 检查本地端口 1080 是否监听（适用于 sing-box）
-    if is_port_open('127.0.0.1', 1080):
+    # 检查本地端口是否监听（支持 HTTP 或 SOCKS5）
+    if is_port_open('127.0.0.1', 1080) or is_port_open('127.0.0.1', 1081):
         proxies = {"http": PROXY_ADDR, "https": PROXY_ADDR}
         return proxies
     return None
@@ -72,7 +72,6 @@ def check_proxy_ip(proxies):
     """
     if not proxies:
         return False, None
-    # 尝试多个 IP 查询服务
     services = [
         'https://api.ipify.org?format=json',
         'https://ip.sb/json',
@@ -86,8 +85,13 @@ def check_proxy_ip(proxies):
                 ip = data.get('ip') or data.get('origin')
                 if ip:
                     return True, ip
-        except:
-            continue
+        except requests.exceptions.ConnectTimeout:
+            print(f"  [代理检测] 连接 {url} 超时")
+        except requests.exceptions.ProxyError as e:
+            print(f"  [代理检测] 代理错误: {e}")
+        except Exception as e:
+            print(f"  [代理检测] 未知错误: {e}")
+        continue
     return False, None
 
 # ===================== 工具函数 =====================
@@ -522,8 +526,8 @@ def renew_account(account):
         if session_token:
             print("  [LOGIN] 尝试使用 session_token 快速登录...")
             page.get("https://hax.co.id/login")
-            # 新版 DrissionPage 使用 cookies.set
-            page.cookies.set({"PHPSESSID": session_token, "domain": "hax.co.id"})
+            # ✅ 修正 Cookie 设置方式
+            page.set_cookies([{"name": "PHPSESSID", "value": session_token, "domain": "hax.co.id"}])
             page.get("https://hax.co.id/vps-info")
             page.wait.doc_loaded(timeout=15)
             if "login" not in page.url.lower():
