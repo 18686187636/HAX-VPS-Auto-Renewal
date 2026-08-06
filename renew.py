@@ -3,7 +3,7 @@
 """
 HAX VPS Auto-Renewal
 - Cookie 快速登录（通过 JS 注入 PHPSESSID）
-- 若 Cookie 失效，自动回退 Telegram OAuth 登录（JS 方式，兼容所有版本）
+- 若 Cookie 失效，自动回退 Telegram OAuth 登录（使用 find_frame）
 - 代理自动检测 + 出口 IP 验证
 - 算术验证码 + 音频 reCAPTCHA 识别
 - 多 Bot 轮询获取续期码
@@ -107,24 +107,35 @@ def notify_failed(phone, step, error, bot_token, chat_id):
     msg = f"❌ <b>VPS 续期失败</b>\n\nHAX\n📱 {phone}\n📍 {step}\n⚠️ {error}\n⏰ {get_beijing_time()}"
     send_telegram_message(msg, bot_token, chat_id)
 
-# ===================== Telegram OAuth 登录（JS 方式，兼容所有版本） =====================
+# ===================== Telegram OAuth 登录（使用 find_frame） =====================
+def find_frame_by_keyword(page, keyword):
+    """查找包含特定关键词的 frame"""
+    try:
+        for frame in page.get_frames():
+            if keyword in (frame.url or "").lower():
+                return frame
+    except Exception:
+        pass
+    return None
+
 def login_with_telegram(page, phone):
-    """使用 Telegram OAuth 登录 HAX，通过 JS 操作 iframe，无需切换上下文"""
+    """使用 Telegram OAuth 登录 HAX，通过 find_frame_by_keyword 获取 iframe"""
     print(f"  [LOGIN] 尝试 Telegram OAuth 登录: {phone}")
     try:
         page.get("https://hax.co.id/login")
         page.wait.doc_loaded(timeout=20)
         page.wait(5)
 
-        # 在父页面通过 JS 点击 iframe 内的登录按钮
-        page.run_js("""
-            const iframe = document.querySelector('iframe[src*="oauth.telegram.org"]');
-            if (iframe) {
-                const doc = iframe.contentDocument || iframe.contentWindow.document;
-                const btn = doc.querySelector('button.tgme_widget_login_button');
-                if (btn) btn.click();
-            }
-        """)
+        # 使用 find_frame_by_keyword 获取 Telegram OAuth iframe
+        frame = find_frame_by_keyword(page, "oauth.telegram.org")
+        if not frame:
+            raise RuntimeError("未找到 Telegram OAuth iframe")
+
+        # 在 frame 内点击登录按钮
+        btn = frame.ele("css:button.tgme_widget_login_button", timeout=5)
+        if not btn:
+            raise RuntimeError("未找到 Telegram 登录按钮")
+        btn.click_self()
         print("  [LOGIN] 点击 Telegram 登录按钮")
         page.wait(3)
 
