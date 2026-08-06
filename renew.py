@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 HAX VPS Auto-Renewal (最终稳定版)
-- Cookie 快速登录（支持完整域和路径注入）
-- 若 Cookie 失效，自动回退 Telegram OAuth 登录（使用 page.tab 切换）
+- Cookie 快速登录（完整域和路径注入）
+- 若 Cookie 失效，自动回退 Telegram OAuth 登录（使用 tab_ids 和 get_tab）
 - 代理自动检测 + 出口 IP 验证
 - 算术验证码 + 音频 reCAPTCHA 识别
 - 多 Bot 轮询获取续期码
@@ -109,7 +109,6 @@ def notify_failed(phone, step, error, bot_token, chat_id):
 
 # ===================== 查找 frame（通用） =====================
 def find_frame_by_keyword(page, keyword):
-    """查找包含特定关键词的 frame"""
     try:
         for frame in page.get_frames():
             if keyword in (frame.url or "").lower():
@@ -118,7 +117,7 @@ def find_frame_by_keyword(page, keyword):
         pass
     return None
 
-# ===================== Telegram OAuth 登录（使用 page.tab 切换） =====================
+# ===================== Telegram OAuth 登录（使用 tab_ids 和 get_tab） =====================
 def login_with_telegram(page, phone):
     print(f"  [LOGIN] 尝试 Telegram OAuth 登录: {phone}")
     try:
@@ -137,24 +136,31 @@ def login_with_telegram(page, phone):
         print("  [LOGIN] 点击 Telegram 登录按钮")
         page.wait(3)
 
-        # 获取当前标签页
-        original_tab = page.tab
-        # 查找新标签页
-        oauth_tab = None
-        for t in page.tabs:
-            if t != original_tab and "oauth.telegram.org" in t.url:
-                oauth_tab = t
+        # 获取当前标签页 ID
+        original_tab_id = page.tab_id
+        # 查找新标签页 ID
+        oauth_tab_id = None
+        for tab_id in page.tab_ids:
+            if tab_id == original_tab_id:
+                continue
+            tab = page.get_tab(tab_id)
+            if "oauth.telegram.org" in (tab.url or ""):
+                oauth_tab_id = tab_id
                 break
-        if not oauth_tab:
+        if not oauth_tab_id:
             time.sleep(2)
-            for t in page.tabs:
-                if t != original_tab and "oauth.telegram.org" in t.url:
-                    oauth_tab = t
+            for tab_id in page.tab_ids:
+                if tab_id == original_tab_id:
+                    continue
+                tab = page.get_tab(tab_id)
+                if "oauth.telegram.org" in (tab.url or ""):
+                    oauth_tab_id = tab_id
                     break
-        if not oauth_tab:
+        if not oauth_tab_id:
             raise RuntimeError("未找到 OAuth tab")
 
-        # 切换到新标签页
+        # 切换到新标签页（通过赋值 page.tab）
+        oauth_tab = page.get_tab(oauth_tab_id)
         page.tab = oauth_tab
         page.wait.doc_loaded(timeout=20)
 
@@ -173,7 +179,7 @@ def login_with_telegram(page, phone):
             print("  [LOGIN] 点击继续")
 
         # 切回主标签页
-        page.tab = original_tab
+        page.tab = page.get_tab(original_tab_id)
 
         # 等待主标签页跳转回 vps-info
         for _ in range(60):
@@ -502,7 +508,6 @@ def solve_arithmetic_captcha(page):
 
 # ===================== 设置 Cookie（增强版） =====================
 def set_session_cookie(page, session_token):
-    """通过 JS 注入完整的 PHPSESSID Cookie，包含域和路径"""
     try:
         page.run_js(f"""
             document.cookie = 'PHPSESSID={session_token}; path=/; domain=.hax.co.id; SameSite=Lax';
@@ -512,7 +517,6 @@ def set_session_cookie(page, session_token):
         return True
     except Exception as e:
         print(f"  [COOKIE] JS 注入失败: {e}")
-    # 备用方式：使用 DrissionPage 的 Cookie 设置方法
     try:
         page.set_cookies([{"name": "PHPSESSID", "value": session_token, "domain": ".hax.co.id", "path": "/"}])
         print("  [COOKIE] 通过 set_cookies 成功")
@@ -601,22 +605,16 @@ def renew_account(account):
 
         print("  ✅ 登录成功，开始续期流程")
 
-        # ---------- 处理广告（修复 press 错误） ----------
+        # ---------- 处理广告 ----------
         time.sleep(3)
-        try:
-            # 尝试按下 ESC 键，某些版本可能没有 press 方法，忽略错误
-            page.actions.press("Escape")
-        except Exception:
-            pass
+        # 使用 JS 模拟 ESC 键（避免 Actions.press 不存在）
+        page.run_js("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'}));")
         time.sleep(1)
         for kw in ["Close", "close", "×"]:
-            try:
-                el = page.ele(f'xpath://*[contains(text(), "{kw}")]')
-                if el and el.is_displayed:
-                    el.click()
-                    break
-            except Exception:
-                pass
+            el = page.ele(f'xpath://*[contains(text(), "{kw}")]')
+            if el and el.is_displayed:
+                el.click()
+                break
         time.sleep(2)
 
         # ---------- 导航到续期 ----------
