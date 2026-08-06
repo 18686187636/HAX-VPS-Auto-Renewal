@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 """
 HAX VPS Auto-Renewal
-- Cookie 快速登录（session_token 或 PHPSESSID）
+- Cookie 快速登录（通过 JS 注入 PHPSESSID）
 - 若 Cookie 失效，自动回退 Telegram OAuth 登录
-- 代理自动检测 + 出口 IP 验证（确保代理生效）
+- 代理自动检测 + 出口 IP 验证（已成功）
 - 算术验证码 + 音频 reCAPTCHA 识别
 - 多 Bot 轮询获取续期码
 - Telegram 通知
@@ -481,6 +481,54 @@ def solve_arithmetic_captcha(page):
     print(f"  [CAPTCHA] 算式: {digits[0]} {op} {digits[1]} = {result}")
     return result
 
+# ===================== 设置 Cookie 的通用函数（兼容所有 DrissionPage 版本） =====================
+def set_session_cookie(page, session_token):
+    """
+    通过多种方式尝试设置 PHPSESSID Cookie，确保兼容不同 DrissionPage 版本
+    """
+    # 方式1：使用 page.run_js 直接注入（最通用）
+    try:
+        page.run_js(f"""
+            document.cookie = 'PHPSESSID={session_token}; path=/; domain=.hax.co.id';
+        """)
+        print("  [COOKIE] 通过 JS 注入成功")
+        return True
+    except Exception as e:
+        print(f"  [COOKIE] JS 注入失败: {e}")
+    
+    # 方式2：尝试 page.set_cookies (旧版)
+    try:
+        page.set_cookies([{"name": "PHPSESSID", "value": session_token, "domain": ".hax.co.id", "path": "/"}])
+        print("  [COOKIE] 通过 set_cookies 成功")
+        return True
+    except AttributeError:
+        pass
+    except Exception as e:
+        print(f"  [COOKIE] set_cookies 异常: {e}")
+    
+    # 方式3：尝试 page.cookies.set (新版)
+    try:
+        page.cookies.set("PHPSESSID", session_token, domain=".hax.co.id", path="/")
+        print("  [COOKIE] 通过 cookies.set 成功")
+        return True
+    except AttributeError:
+        pass
+    except Exception as e:
+        print(f"  [COOKIE] cookies.set 异常: {e}")
+    
+    # 方式4：使用 page.set_cookie (单数) 
+    try:
+        page.set_cookie({"name": "PHPSESSID", "value": session_token, "domain": ".hax.co.id", "path": "/"})
+        print("  [COOKIE] 通过 set_cookie 成功")
+        return True
+    except AttributeError:
+        pass
+    except Exception as e:
+        print(f"  [COOKIE] set_cookie 异常: {e}")
+    
+    print("  [COOKIE] 所有方式均失败，无法设置 Cookie")
+    return False
+
 # ===================== 单账号续期主流程 =====================
 def renew_account(account):
     phone = account.get("phone")
@@ -526,8 +574,9 @@ def renew_account(account):
         if session_token:
             print("  [LOGIN] 尝试使用 session_token 快速登录...")
             page.get("https://hax.co.id/login")
-            # ✅ 修正 Cookie 设置方式
-            page.set_cookies([{"name": "PHPSESSID", "value": session_token, "domain": "hax.co.id"}])
+            # 使用通用函数设置 Cookie
+            set_session_cookie(page, session_token)
+            # 刷新或直接访问 vps-info
             page.get("https://hax.co.id/vps-info")
             page.wait.doc_loaded(timeout=15)
             if "login" not in page.url.lower():
