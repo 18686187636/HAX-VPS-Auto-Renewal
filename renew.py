@@ -40,7 +40,7 @@ PROXY_ADDR = os.getenv("PROXY_SERVER", "socks5://127.0.0.1:1080")
 CODE_FILE = "renewal_code.txt"
 TG_RENEWAL_PATTERN = re.compile(r'[A-Za-z0-9+/=]{32,}')
 DEBUG = os.getenv("DEBUG", "true").lower() == "true"
-SEND_SCREENSHOTS = os.getenv("SEND_SCREENSHOTS", "true").lower() == "true"   # 默认开启截图发送
+SEND_SCREENSHOTS = os.getenv("SEND_SCREENSHOTS", "true").lower() == "true"
 
 def debug_print(*args, **kwargs):
     if DEBUG:
@@ -105,7 +105,6 @@ def send_telegram_message(text, bot_token, chat_id):
             return False
 
 def send_telegram_photo(photo_path, caption, bot_token, chat_id):
-    """发送图片到 Telegram，如果文件不存在则跳过"""
     if not bot_token or not chat_id or not SEND_SCREENSHOTS:
         return False
     if not os.path.exists(photo_path):
@@ -122,6 +121,37 @@ def send_telegram_photo(photo_path, caption, bot_token, chat_id):
     except Exception as e:
         print(f"  [TG] 发送图片失败: {e}", flush=True)
         return False
+
+def take_screenshot(page, path, bot_token, chat_id, caption):
+    """截图并发送到 Telegram（兼容 ruyipage）"""
+    try:
+        # 尝试获取原生 WebDriver
+        driver = None
+        if hasattr(page, 'page'):
+            driver = page.page
+        elif hasattr(page, '_driver'):
+            driver = page._driver
+        else:
+            # 尝试直接调用 page.driver (有些版本)
+            try:
+                driver = page.driver
+            except:
+                pass
+
+        if driver and hasattr(driver, 'get_screenshot_as_file'):
+            driver.get_screenshot_as_file(path)
+        else:
+            # 尝试 ruyipage 自带方法（虽然已失败，但保留fallback）
+            try:
+                page.get_screenshot(path)
+            except:
+                pass
+            return
+
+        if os.path.exists(path):
+            send_telegram_photo(path, caption, bot_token, chat_id)
+    except Exception as e:
+        print(f"  [截图] 失败: {e}", flush=True)
 
 def notify_success(phone, expiry, bot_token, chat_id):
     msg = f"✅ <b>VPS 续期成功</b>\n\nHAX\n📱 {phone}\n📅 {expiry or '未知'}\n⏰ {get_beijing_time()}"
@@ -684,9 +714,7 @@ def renew_account(account):
         # ----- 登录成功截图并发送 -----
         try:
             login_png = f"login_success_{phone}.png"
-            page.get_screenshot(path=login_png)
-            caption = f"✅ 登录成功 - {phone}"
-            send_telegram_photo(login_png, caption, bot_token, chat_id)
+            take_screenshot(page, login_png, bot_token, chat_id, f"✅ 登录成功 - {phone}")
         except Exception as e:
             print(f"  [截图] 登录截图失败: {e}", flush=True)
 
@@ -757,9 +785,7 @@ def renew_account(account):
         # ----- 点击 Renew VPS 后截图并发送 -----
         try:
             renew_png = f"renew_vps_{phone}.png"
-            page.get_screenshot(path=renew_png)
-            caption = f"🔄 已点击 Renew VPS - {phone}"
-            send_telegram_photo(renew_png, caption, bot_token, chat_id)
+            take_screenshot(page, renew_png, bot_token, chat_id, f"🔄 已点击 Renew VPS - {phone}")
         except Exception as e:
             print(f"  [截图] Renew VPS 截图失败: {e}", flush=True)
 
@@ -781,8 +807,7 @@ def renew_account(account):
             # 超时未收到续期码，截图当前页面发送
             try:
                 timeout_png = f"timeout_{phone}.png"
-                page.get_screenshot(path=timeout_png)
-                send_telegram_photo(timeout_png, f"⏰ 续期码超时 - {phone}\n请检查 HaxTG_bot 是否发送", bot_token, chat_id)
+                take_screenshot(page, timeout_png, bot_token, chat_id, f"⏰ 续期码超时 - {phone}\n请检查 HaxTG_bot 是否发送")
             except:
                 pass
             raise RuntimeError("未获取到续期码")
@@ -918,10 +943,9 @@ def renew_account(account):
         # ----- 最终结果截图并发送 -----
         try:
             result_png = f"result_{phone}.png"
-            page.get_screenshot(path=result_png)
             status = "成功" if is_success else "失败"
             caption = f"{'✅' if is_success else '❌'} {status} - {phone}\n到期日: {expiry_date or '未知'}"
-            send_telegram_photo(result_png, caption, bot_token, chat_id)
+            take_screenshot(page, result_png, bot_token, chat_id, caption)
         except Exception as e:
             print(f"  [截图] 结果截图失败: {e}", flush=True)
 
@@ -941,8 +965,7 @@ def renew_account(account):
         if page:
             try:
                 error_png = f"error_{phone}.png"
-                page.get_screenshot(path=error_png)
-                send_telegram_photo(error_png, f"⚠️ 异常 - {phone}\n{e}", bot_token, chat_id)
+                take_screenshot(page, error_png, bot_token, chat_id, f"⚠️ 异常 - {phone}\n{e}")
             except:
                 pass
         notify_failed(phone, "执行异常", str(e), bot_token, chat_id)
