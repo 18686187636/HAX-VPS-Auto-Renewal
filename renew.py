@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (10秒后提取最新消息 - 强制 offset=0)
+HAX VPS Auto-Renewal (10秒后读取文件或 Bot 最新消息)
 """
 import os
 import sys
@@ -611,12 +611,10 @@ def solve_arithmetic_captcha(page):
     print(f"  [CAPTCHA] 算式: {digits[0]} {op_symbol} {digits[1]} = {result}", flush=True)
     return result
 
-# ===================== 获取最新消息（强制 offset=0） =====================
+# ===================== 获取最新消息（从 Bot） =====================
 def get_latest_message(bot_token):
-    """获取目标 Bot 的最新一条消息，若包含续期码则返回，否则返回 None"""
     try:
         proxies = get_proxies()
-        # 使用 offset=0 强制获取所有消息，取最后一条
         url = f"https://api.telegram.org/bot{bot_token}/getUpdates?offset=0"
         resp = req_lib.get(url, timeout=15, proxies=proxies) if proxies else req_lib.get(url, timeout=15)
         data = resp.json()
@@ -632,8 +630,6 @@ def get_latest_message(bot_token):
                     if match:
                         code = match.group(0)
                         print(f"  [最新消息] ✅ 提取到续期码: {code[:20]}...", flush=True)
-                        with open(CODE_FILE, "w") as f:
-                            f.write(code)
                         return code
                     else:
                         print(f"  [最新消息] 内容不匹配续期码模式", flush=True)
@@ -645,6 +641,23 @@ def get_latest_message(bot_token):
             print(f"  [最新消息] API 响应异常: {data}", flush=True)
     except Exception as e:
         print(f"  [最新消息] 获取异常: {e}", flush=True)
+    return None
+
+def read_code_from_file():
+    """从文件读取续期码"""
+    try:
+        if os.path.exists(CODE_FILE):
+            with open(CODE_FILE, 'r', encoding='utf-8') as f:
+                code = f.read().strip()
+            if code and TG_RENEWAL_PATTERN.search(code):
+                print(f"  [文件] ✅ 从文件读取到续期码: {code[:20]}...")
+                return code
+            else:
+                print(f"  [文件] 文件内容无效或为空", flush=True)
+        else:
+            print(f"  [文件] 文件不存在", flush=True)
+    except Exception as e:
+        print(f"  [文件] 读取异常: {e}", flush=True)
     return None
 
 # ===================== 广告关闭 =====================
@@ -826,13 +839,17 @@ def renew_account(account):
         print("  [FORM] 点击 Renew VPS", flush=True)
         page.wait(5)
 
-        # ---------- 等待 10 秒后提取最新消息 ----------
-        print("  [CODE] 等待 10 秒后读取目标 Bot 最新消息...", flush=True)
+        # ---------- 等待 10 秒后读取续期码（优先文件，其次 Bot） ----------
+        print("  [CODE] 等待 10 秒后读取续期码...", flush=True)
         time.sleep(10)
 
-        code = get_latest_message(bot_token)
+        code = read_code_from_file()
         if code is None:
-            raise RuntimeError("未获取到续期码（目标 Bot 最新消息无续期码）")
+            print("  [CODE] 文件无续期码，尝试从目标 Bot 获取...", flush=True)
+            code = get_latest_message(bot_token)
+
+        if code is None:
+            raise RuntimeError("未获取到续期码（文件与 Bot 均无）")
 
         print(f"  [CODE] 获取到续期码: {code[:20]}***", flush=True)
 
@@ -987,7 +1004,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (10秒后提取最新消息 - offset=0)", flush=True)
+    print("   HAX 自动续期 (文件 + Bot 双重读取)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
