@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (增强调试版)
+HAX VPS Auto-Renewal (增强调试版 + 截图推送)
 - 每一步都打印状态，便于定位卡点
+- 关键步骤自动截图并通过 Telegram Bot 发送
 - 支持 ruyipage + Telegram OAuth（原始登录方式）
 - 支持 Cookie 快速登录
 - 代理、验证码、续期码、通知
@@ -38,13 +39,14 @@ HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
 PROXY_ADDR = os.getenv("PROXY_SERVER", "socks5://127.0.0.1:1080")
 CODE_FILE = "renewal_code.txt"
 TG_RENEWAL_PATTERN = re.compile(r'[A-Za-z0-9+/=]{32,}')
-DEBUG = os.getenv("DEBUG", "true").lower() == "true"   # 默认开启调试
+DEBUG = os.getenv("DEBUG", "true").lower() == "true"
+SEND_SCREENSHOTS = os.getenv("SEND_SCREENSHOTS", "true").lower() == "true"   # 默认开启截图发送
 
 def debug_print(*args, **kwargs):
     if DEBUG:
         print("[DEBUG]", *args, **kwargs, flush=True)
 
-# ===================== 代理检测（使用 requests） =====================
+# ===================== 代理检测 =====================
 def is_port_open(host, port):
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -102,6 +104,25 @@ def send_telegram_message(text, bot_token, chat_id):
         except Exception:
             return False
 
+def send_telegram_photo(photo_path, caption, bot_token, chat_id):
+    """发送图片到 Telegram，如果文件不存在则跳过"""
+    if not bot_token or not chat_id or not SEND_SCREENSHOTS:
+        return False
+    if not os.path.exists(photo_path):
+        print(f"  [TG] 图片文件不存在: {photo_path}", flush=True)
+        return False
+    proxies = get_proxies()
+    url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
+    try:
+        with open(photo_path, 'rb') as f:
+            files = {'photo': f}
+            data = {'chat_id': chat_id, 'caption': caption}
+            resp = req_lib.post(url, data=data, files=files, timeout=30, proxies=proxies)
+            return resp.json().get("ok", False)
+    except Exception as e:
+        print(f"  [TG] 发送图片失败: {e}", flush=True)
+        return False
+
 def notify_success(phone, expiry, bot_token, chat_id):
     msg = f"✅ <b>VPS 续期成功</b>\n\nHAX\n📱 {phone}\n📅 {expiry or '未知'}\n⏰ {get_beijing_time()}"
     send_telegram_message(msg, bot_token, chat_id)
@@ -110,9 +131,8 @@ def notify_failed(phone, step, error, bot_token, chat_id):
     msg = f"❌ <b>VPS 续期失败</b>\n\nHAX\n📱 {phone}\n📍 {step}\n⚠️ {error}\n⏰ {get_beijing_time()}"
     send_telegram_message(msg, bot_token, chat_id)
 
-# ===================== Telegram OAuth 登录（取自原始脚本，已验证可行） =====================
+# ===================== Telegram OAuth 登录（原始方式） =====================
 def login_with_telegram_original(page, phone):
-    """使用原始脚本的方法进行 Telegram OAuth 登录"""
     debug_print("进入 login_with_telegram_original")
     print(f"  [LOGIN] 尝试 Telegram OAuth 登录: {phone}", flush=True)
     try:
@@ -128,7 +148,6 @@ def login_with_telegram_original(page, phone):
             print("  [LOGIN] 点击 Telegram 登录按钮", flush=True)
             page.wait(3)
 
-            # 查找 OAuth tab
             debug_print("查找 OAuth 标签页")
             tab_ids = page.tab_ids
             oauth_tab_id = None
@@ -147,7 +166,6 @@ def login_with_telegram_original(page, phone):
             oauth_page.wait.doc_loaded(timeout=20)
             print(f"  [LOGIN] OAuth URL: {oauth_page.url}", flush=True)
 
-            # 输入手机号
             debug_print("查找手机号输入框")
             phone_input = oauth_page.ele("css:#login-phone-code")
             if not phone_input:
@@ -156,14 +174,12 @@ def login_with_telegram_original(page, phone):
             print(f"  [LOGIN] 输入手机号: {phone}", flush=True)
             page.wait(2)
 
-            # 点击继续
             debug_print("查找继续按钮")
             continue_btn = oauth_page.ele("text:继续") or oauth_page.ele("css:button[type=submit]") or oauth_page.ele("css:button")
             if continue_btn:
                 continue_btn.click_self()
                 print("  [LOGIN] 点击继续", flush=True)
 
-            # 等待跳转回 vps-info
             debug_print("等待跳转回 vps-info")
             for _ in range(60):
                 page.wait(2)
@@ -177,7 +193,7 @@ def login_with_telegram_original(page, phone):
         traceback.print_exc()
         return False
 
-# ===================== 设置 Cookie（适用于 ruyipage） =====================
+# ===================== 设置 Cookie =====================
 def set_session_cookie(page, session_token):
     debug_print("设置 Cookie")
     try:
@@ -194,7 +210,7 @@ def set_session_cookie(page, session_token):
         debug_print(f"JS 注入失败: {e}")
     return False
 
-# ===================== reCAPTCHA 音频求解（保留原实现，但适配 ruyipage） =====================
+# ===================== reCAPTCHA 音频求解 =====================
 def find_frame(page, keyword):
     try:
         frames = page.get_frames()
@@ -543,7 +559,7 @@ def solve_arithmetic_captcha(page):
     print(f"  [CAPTCHA] 算式: {digits[0]} {op_symbol} {digits[1]} = {result}", flush=True)
     return result
 
-# ===================== 续期码获取（多 Bot 轮询） =====================
+# ===================== 续期码获取 =====================
 def get_renewal_code_from_telegram(bot_tokens, timeout=1800, poll_interval=10):
     debug_print(f"进入 get_renewal_code_from_telegram，超时 {timeout}s")
     offsets = {}
@@ -591,7 +607,7 @@ def get_renewal_code_from_telegram(bot_tokens, timeout=1800, poll_interval=10):
             print(f"  [CODE] 等待中... ({elapsed//60} 分钟)", flush=True)
     return "", None
 
-# ===================== 单账号续期主流程（整合原始登录） =====================
+# ===================== 单账号续期主流程（含截图推送） =====================
 def renew_account(account):
     phone = account.get("phone")
     session_token = account.get("session_token")
@@ -626,9 +642,7 @@ def renew_account(account):
             "headless": HEADLESS,
             "window_size": (1366, 768),
         }
-        # 如果代理可用，尝试添加代理（ruyipage 可能用 'proxy' 参数）
         if proxies is not None:
-            # 注意：ruyipage 的 launch 可能接受 'proxy' 参数，格式为 "socks5://127.0.0.1:1080"
             launch_args["proxy"] = PROXY_ADDR
             debug_print(f"设置代理参数: {PROXY_ADDR}")
         else:
@@ -667,7 +681,16 @@ def renew_account(account):
 
         print("  ✅ 登录成功，开始续期流程", flush=True)
 
-        # ---------- 处理广告（使用原始脚本方式） ----------
+        # ----- 登录成功截图并发送 -----
+        try:
+            login_png = f"login_success_{phone}.png"
+            page.get_screenshot(path=login_png)
+            caption = f"✅ 登录成功 - {phone}"
+            send_telegram_photo(login_png, caption, bot_token, chat_id)
+        except Exception as e:
+            print(f"  [截图] 登录截图失败: {e}", flush=True)
+
+        # ---------- 处理广告 ----------
         debug_print("处理广告")
         print("  [AD] 等待并关闭广告...", flush=True)
         page.wait(3)
@@ -731,6 +754,15 @@ def renew_account(account):
         print("  [FORM] 点击 Renew VPS", flush=True)
         page.wait(5)
 
+        # ----- 点击 Renew VPS 后截图并发送 -----
+        try:
+            renew_png = f"renew_vps_{phone}.png"
+            page.get_screenshot(path=renew_png)
+            caption = f"🔄 已点击 Renew VPS - {phone}"
+            send_telegram_photo(renew_png, caption, bot_token, chat_id)
+        except Exception as e:
+            print(f"  [截图] Renew VPS 截图失败: {e}", flush=True)
+
         # ---------- 获取续期码 ----------
         debug_print("开始获取续期码")
         print("  [CODE] 等待 @HaxTG_bot 发送续期码...", flush=True)
@@ -746,6 +778,13 @@ def renew_account(account):
 
         code, source = get_renewal_code_from_telegram(all_bots, timeout=1800, poll_interval=10)
         if not code:
+            # 超时未收到续期码，截图当前页面发送
+            try:
+                timeout_png = f"timeout_{phone}.png"
+                page.get_screenshot(path=timeout_png)
+                send_telegram_photo(timeout_png, f"⏰ 续期码超时 - {phone}\n请检查 HaxTG_bot 是否发送", bot_token, chat_id)
+            except:
+                pass
             raise RuntimeError("未获取到续期码")
 
         try:
@@ -876,6 +915,16 @@ def renew_account(account):
                     print(f"  [RESULT] 到期日: {expiry_date}", flush=True)
                     break
 
+        # ----- 最终结果截图并发送 -----
+        try:
+            result_png = f"result_{phone}.png"
+            page.get_screenshot(path=result_png)
+            status = "成功" if is_success else "失败"
+            caption = f"{'✅' if is_success else '❌'} {status} - {phone}\n到期日: {expiry_date or '未知'}"
+            send_telegram_photo(result_png, caption, bot_token, chat_id)
+        except Exception as e:
+            print(f"  [截图] 结果截图失败: {e}", flush=True)
+
         if is_success:
             notify_success(phone, expiry_date or "未知日期", bot_token, chat_id)
             return True
@@ -888,6 +937,14 @@ def renew_account(account):
     except Exception as e:
         print(f"  ❌ 异常: {e}", flush=True)
         traceback.print_exc()
+        # 发生异常时也尝试截图
+        if page:
+            try:
+                error_png = f"error_{phone}.png"
+                page.get_screenshot(path=error_png)
+                send_telegram_photo(error_png, f"⚠️ 异常 - {phone}\n{e}", bot_token, chat_id)
+            except:
+                pass
         notify_failed(phone, "执行异常", str(e), bot_token, chat_id)
         return False
     finally:
@@ -901,7 +958,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (增强调试版)", flush=True)
+    print("   HAX 自动续期 (增强调试版 + 截图推送)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
