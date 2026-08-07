@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (多账号独立 Bot 轮询版 - 提前轮询)
+HAX VPS Auto-Renewal (提前轮询 + 就绪等待)
 """
 import os
 import sys
@@ -35,7 +35,7 @@ PROXY_ADDR = os.getenv("PROXY_SERVER", "socks5://127.0.0.1:1080")
 CODE_FILE = "renewal_code.txt"
 TG_RENEWAL_PATTERN = re.compile(r'[A-Za-z0-9+/=]{32,}')
 DEBUG = os.getenv("DEBUG", "true").lower() == "true"
-SEND_SCREENSHOTS = os.getenv("SEND_SCREENSHOTS", "true").lower() == "true"
+SEND_SCREENSHOTS = os.getenv("SEND_SCREENSHOTS", "true").lower() == "true")
 
 def debug_print(*args, **kwargs):
     if DEBUG:
@@ -612,9 +612,8 @@ def solve_arithmetic_captcha(page):
     print(f"  [CAPTCHA] 算式: {digits[0]} {op_symbol} {digits[1]} = {result}", flush=True)
     return result
 
-# ===================== 续期码轮询（线程安全，无截图） =====================
-def poll_code(bot_tokens, timeout, poll_interval):
-    """轮询 Bot 获取续期码（独立线程调用，不操作 page）"""
+# ===================== 续期码轮询（独立线程，不操作页面） =====================
+def poll_code(bot_tokens, timeout, poll_interval, ready_event=None):
     if not bot_tokens:
         return None
     debug_print(f"轮询线程启动，超时 {timeout}s，监听 {len(bot_tokens)} 个 Bot")
@@ -631,6 +630,9 @@ def poll_code(bot_tokens, timeout, poll_interval):
                 offsets[bt['token']] = 0
         except Exception:
             offsets[bt['token']] = 0
+    # 第一次连接完成，通知主线程已就绪
+    if ready_event:
+        ready_event.set()
     elapsed = 0
     while elapsed < timeout:
         for bt in bot_tokens:
@@ -825,16 +827,27 @@ def renew_account(account):
         poll_thread = None
         poll_timeout = 1800  # 30 分钟
         poll_interval = 10
+        ready_event = threading.Event()
 
         # 启动轮询线程（在点击前就开始）
         debug_print("启动后台轮询线程...")
         def poll_target():
             nonlocal code
-            code = poll_code(current_bot, poll_timeout, poll_interval)
+            code = poll_code(current_bot, poll_timeout, poll_interval, ready_event)
 
         poll_thread = threading.Thread(target=poll_target, daemon=True)
         poll_thread.start()
-        debug_print("轮询线程已启动，继续执行点击...")
+        
+        # 等待轮询线程就绪（已建立连接，开始监听）
+        debug_print("等待轮询线程就绪...")
+        ready_event.wait(timeout=30)  # 最多等待30秒
+        if not ready_event.is_set():
+            debug_print("轮询线程未能在30秒内就绪，继续执行...")
+        else:
+            debug_print("轮询线程已就绪，可以点击按钮")
+
+        # 现在才打印等待消息并点击
+        print("  [CODE] 等待 @HaxTG_bot 发送续期码...", flush=True)
 
         # ---------- 点击 Renew VPS ----------
         renew_vps_btn = page.ele("css:button[name=submit_button][type=button].btn-primary")
@@ -844,8 +857,7 @@ def renew_account(account):
         print("  [FORM] 点击 Renew VPS", flush=True)
         page.wait(5)
 
-        # ---------- 等待轮询结果（最多 30 分钟） ----------
-        print("  [CODE] 等待 @HaxTG_bot 发送续期码...", flush=True)
+        # ---------- 等待轮询结果（主线程等待，同时截图） ----------
         start_wait = time.time()
         last_screenshot_minute = -1
         while poll_thread.is_alive() and code is None:
@@ -853,18 +865,15 @@ def renew_account(account):
             current_minute = int(elapsed // 60)
             if current_minute > last_screenshot_minute and current_minute > 0:
                 last_screenshot_minute = current_minute
-                # 主线程截图（每分钟一次）
                 try:
                     png_path = f"waiting_{phone}_{current_minute}m.png"
                     take_screenshot(page, png_path, bot_token, chat_id,
                                     f"⏳ 等待续期码 (已等待 {current_minute} 分钟) - {phone}")
                 except Exception as e:
                     print(f"  [截图] 等待截图失败: {e}", flush=True)
-            time.sleep(1)  # 避免高 CPU
+            time.sleep(1)
 
-        # 线程超时或已获取到 code
         if code is None:
-            # 超时
             try:
                 take_screenshot(page, f"timeout_{phone}.png", bot_token, chat_id,
                                 f"⏰ 续期码超时 - {phone}\n请检查 HaxTG_bot 是否发送了续期码到你的 Telegram 账号")
@@ -1021,7 +1030,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (提前轮询版)", flush=True)
+    print("   HAX 自动续期 (提前轮询 + 就绪等待)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
