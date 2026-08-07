@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (增强弹窗清理 + 提交前截图)
+HAX VPS Auto-Renewal (增强弹窗清理 + 提交前截图 + 不解码续期码)
 """
 import os
 import sys
@@ -29,7 +29,7 @@ except ImportError:
 # ===================== 环境变量 =====================
 ACCOUNTS_JSON = os.getenv("ACCOUNTS_JSON", "[]")
 ACCOUNTS = json.loads(ACCOUNTS_JSON)
-HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
+HEADLESS = os.getenv("HEADLESS", "true").lower() == "true")
 PROXY_ADDR = os.getenv("PROXY_SERVER", "socks5://127.0.0.1:1080")
 CODE_FILE = "renewal_code.txt"
 TG_RENEWAL_PATTERN = re.compile(r'[A-Za-z0-9+/=]{32,}')
@@ -906,12 +906,9 @@ def renew_account(account):
                 pass
             raise RuntimeError("未获取到续期码")
 
-        try:
-            decoded = base64.b64decode(code).decode('utf-8')
-            print(f"  [CODE] 解码后: {decoded[:20]}***", flush=True)
-        except:
-            decoded = code
-            print(f"  [CODE] 非 Base64，直接使用: {decoded[:20]}***", flush=True)
+        # ⚠️ 修改：不进行解码，直接使用原始 Base64 字符串
+        print(f"  [CODE] 使用原始码: {code[:20]}***", flush=True)
+        renewal_code_to_input = code
 
         # ---------- 进入续期码输入页 ----------
         debug_print("进入续期码输入页")
@@ -945,7 +942,7 @@ def renew_account(account):
                 code_input.input(str(captcha_result), clear=True)
                 print(f"  [CAPTCHA] 输入结果: {captcha_result}", flush=True)
 
-        # 填入续期码
+        # 填入续期码（直接使用原始 Base64）
         debug_print("填入续期码")
         vcode_input = None
         for selector in ["css:input.form-control:not(#captcha)", "css:input[name=code]", "css:input#code"]:
@@ -963,8 +960,8 @@ def renew_account(account):
                 page.wait(1)
             except Exception:
                 pass
-            vcode_input.input(decoded, clear=True)
-            print(f"  [CODE] 输入 renewal code: {decoded[:10]}***", flush=True)
+            vcode_input.input(renewal_code_to_input, clear=True)
+            print(f"  [CODE] 输入 renewal code (原始Base64): {renewal_code_to_input[:20]}***", flush=True)
 
         # ---------- reCAPTCHA ----------
         debug_print("开始 reCAPTCHA")
@@ -981,7 +978,7 @@ def renew_account(account):
         print("  [SUBMIT] 提交续期...", flush=True)
         close_ads(page)  # 先关闭可能遮挡的广告
 
-        # 🆕 在点击提交按钮之前截图，记录表单状态
+        # 在点击提交按钮之前截图，记录表单状态
         try:
             take_screenshot(page, f"before_submit_{phone}.png", bot_token, chat_id,
                             f"📝 提交前截图 - {phone} (已填好续期码和reCAPTCHA)")
@@ -1095,7 +1092,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (增强弹窗清理 + 提交前截图)", flush=True)
+    print("   HAX 自动续期 (最终修正版)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
