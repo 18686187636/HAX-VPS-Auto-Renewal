@@ -2,8 +2,8 @@ name: HAX Auto Renew
 
 on:
   schedule:
-    - cron: '0 0 * * *'
-  workflow_dispatch:
+    - cron: '0 0 * * *'          # 每天 UTC 00:00（北京时间 08:00）
+  workflow_dispatch:             # 允许手动触发
 
 jobs:
   renew:
@@ -11,50 +11,51 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: ⚙ 设置 Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: 🛠️ 安装系统依赖和 Python 依赖
+      - name: Install system dependencies and Python packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb x11-utils wget net-tools jq chromium-browser ffmpeg curl scrot
+          sudo apt-get install -y xvfb x11-utils wget net-tools jq chromium-browser ffmpeg curl
           pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: 🔗 配置代理（sing-box）
+      - name: Configure sing-box proxy (if NODE_LINK provided)
         if: env.NODE_LINK != ''
         env:
           NODE_LINK: ${{ secrets.NODE_LINK }}
         run: |
           set -e
-          echo "⬇️ 下载 sing-box 二进制..."
+          echo "⬇️ Downloading sing-box binary..."
           LATEST_URL=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | \
             grep -o '"browser_download_url": "[^"]*linux-amd64[^"]*"' | \
             grep -v 'alpha\|beta\|rc' | head -1 | sed 's/"browser_download_url": "//' | sed 's/"//')
-          if [ -z "$LATEST_URL" ]; then echo "❌ 无法获取下载链接"; exit 1; fi
-          echo "📥 下载地址: $LATEST_URL"
+          if [ -z "$LATEST_URL" ]; then echo "❌ Failed to get download URL"; exit 1; fi
+          echo "📥 Download URL: $LATEST_URL"
           for i in {1..3}; do
-            echo "尝试 $i/3..."
+            echo "Attempt $i/3..."
             curl -L -o sing-box.tar.gz "$LATEST_URL" --connect-timeout 30 --max-time 60
             if [ -f sing-box.tar.gz ] && file sing-box.tar.gz | grep -q 'gzip compressed data'; then
-              echo "✅ 下载成功"; break
+              echo "✅ Download successful"; break
             fi
-            echo "⚠️ 重试..."; rm -f sing-box.tar.gz; sleep 3
+            echo "⚠️ Retrying..."; rm -f sing-box.tar.gz; sleep 3
           done
-          [ -f sing-box.tar.gz ] || { echo "❌ 下载失败，跳过代理"; exit 0; }
+          [ -f sing-box.tar.gz ] || { echo "❌ Download failed, skipping proxy"; exit 0; }
           tar -xzf sing-box.tar.gz
           SING_BOX_DIR=$(find . -maxdepth 1 -type d -name "sing-box-*" | head -1)
-          [ -z "$SING_BOX_DIR" ] && { echo "❌ 解压失败"; exit 1; }
+          [ -z "$SING_BOX_DIR" ] && { echo "❌ Extraction failed"; exit 1; }
           sudo mv "$SING_BOX_DIR/sing-box" /usr/local/bin/
           sudo chmod +x /usr/local/bin/sing-box
           rm -rf sing-box.tar.gz "$SING_BOX_DIR"
           sing-box version
 
-          echo "📝 解析 vless 链接并生成配置文件..."
+          echo "📝 Parsing vless link and generating config..."
           python3 << 'PYEOF'
           import json, sys, os, re
           from urllib.parse import urlparse, parse_qs
@@ -83,7 +84,7 @@ jobs:
                   else:
                       host = host_port
           if not host:
-              print(f"❌ 无法解析主机地址: {host_port}")
+              print(f"❌ Cannot parse host: {host_port}")
               sys.exit(1)
           params = parse_qs(parsed.query)
           sni = params.get('sni', [''])[0] or host
@@ -150,65 +151,45 @@ jobs:
           }
           with open("sing-box-config.json", "w") as f:
               json.dump(config, f, indent=2)
-          print("✅ sing-box-config.json 已生成")
+          print("✅ sing-box-config.json generated")
           PYEOF
 
           if [ -f sing-box-config.json ]; then
-            echo "🚀 启动 sing-box..."
+            echo "🚀 Starting sing-box..."
             nohup sing-box -c sing-box-config.json run > sing-box.log 2>&1 &
             sleep 5
             if netstat -tuln | grep -q ':1080'; then
-              echo "✅ SOCKS5 代理已启动（127.0.0.1:1080）"
-              echo "✅ HTTP 代理已启动（127.0.0.1:1081）"
+              echo "✅ SOCKS5 proxy started (127.0.0.1:1080)"
+              echo "✅ HTTP proxy started (127.0.0.1:1081)"
             else
-              echo "❌ 代理启动失败，查看日志："
+              echo "❌ Proxy failed to start, logs:"
               cat sing-box.log
               exit 1
             fi
           else
-            echo "⚠️ 未生成配置文件，跳过代理"
+            echo "⚠️ No config file generated, skipping proxy"
           fi
 
-      - name: 📋 打印 sing-box 日志（调试）
+      - name: Print sing-box log (debug)
         if: always()
         run: cat sing-box.log || true
 
-      - name: 🚀 运行续期脚本（带截图）
+      - name: Run renewal script with Xvfb (virtual display)
         env:
           ACCOUNTS_JSON: ${{ secrets.ACCOUNTS_JSON }}
           HEADLESS: "true"
           PROXY_SERVER: ${{ secrets.NODE_LINK != '' && 'http://127.0.0.1:1081' || '' }}
         run: |
           if [ -n "$PROXY_SERVER" ]; then
-            echo "🔗 已启用代理: $PROXY_SERVER"
-            echo "🧪 测试代理连通性..."
-            curl -x "$PROXY_SERVER" -s https://api.ipify.org && echo " ✅ curl 代理测试成功" || echo " ⚠️ curl 代理测试失败"
+            echo "🔗 Proxy enabled: $PROXY_SERVER"
+            echo "🧪 Testing proxy connectivity..."
+            curl -x "$PROXY_SERVER" -s https://api.ipify.org && echo " ✅ curl proxy test successful" || echo " ⚠️ curl proxy test failed"
           else
-            echo "🍭 未启用代理，直连访问"
+            echo "🍭 Proxy disabled, using direct connection"
           fi
-          # 启动 Xvfb 并运行脚本，同时开启截图功能（使用 scrot）
-          xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" bash -c "
-            python renew.py &
-            PID=\$!
-            # 等待脚本运行，同时定期截图
-            while kill -0 \$PID 2>/dev/null; do
-              scrot -d 10 'screenshot_%Y%m%d_%H%M%S.png'
-              sleep 10
-            done
-            wait \$PID
-          "
+          xvfb-run --auto-servernum python3 renew.py
 
-      - name: 📸 上传截图
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-screenshots
-          path: |
-            *.png
-            *.log
-          if-no-files-found: ignore
-
-      - name: 🧽 清理进程
+      - name: Cleanup processes
         if: always()
         run: |
           pkill -f sing-box || true
