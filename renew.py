@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (轮询取最新消息)
+HAX VPS Auto-Renewal (10秒后提取最新消息)
 """
 import os
 import sys
@@ -14,7 +14,6 @@ import tempfile
 import random
 import socket
 import traceback
-import threading
 from datetime import datetime, timezone, timedelta
 
 import requests as req_lib
@@ -30,12 +29,12 @@ except ImportError:
 # ===================== 环境变量 =====================
 ACCOUNTS_JSON = os.getenv("ACCOUNTS_JSON", "[]")
 ACCOUNTS = json.loads(ACCOUNTS_JSON)
-HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
+HEADLESS = os.getenv("HEADLESS", "true").lower() == "true")
 PROXY_ADDR = os.getenv("PROXY_SERVER", "socks5://127.0.0.1:1080")
 CODE_FILE = "renewal_code.txt"
 TG_RENEWAL_PATTERN = re.compile(r'[A-Za-z0-9+/=]{32,}')
 DEBUG = os.getenv("DEBUG", "true").lower() == "true"
-SEND_SCREENSHOTS = os.getenv("SEND_SCREENSHOTS", "true").lower() == "true"
+SEND_SCREENSHOTS = os.getenv("SEND_SCREENSHOTS", "true").lower() == "true")
 
 def debug_print(*args, **kwargs):
     if DEBUG:
@@ -612,52 +611,39 @@ def solve_arithmetic_captcha(page):
     print(f"  [CAPTCHA] 算式: {digits[0]} {op_symbol} {digits[1]} = {result}", flush=True)
     return result
 
-# ===================== 轮询取最新消息 =====================
-def poll_code(bot_tokens, timeout, poll_interval):
-    if not bot_tokens:
-        return None
-    debug_print(f"轮询线程启动，超时 {timeout}s，监听 {len(bot_tokens)} 个 Bot")
-    
-    print("  [CODE] 轮询中... (0 分钟)", flush=True)
-
-    offsets = {bt['token']: 0 for bt in bot_tokens}
-    
-    elapsed = 0
-    while elapsed < timeout:
-        for bt in bot_tokens:
-            offset = offsets.get(bt['token'], 0)
-            try:
-                proxies = get_proxies()
-                url = f"https://api.telegram.org/bot{bt['token']}/getUpdates?offset={offset}&limit=1&timeout=5"
-                resp = (req_lib.get(url, timeout=15, proxies=proxies) if proxies else req_lib.get(url, timeout=15))
-                data = resp.json()
-                if data.get("ok"):
-                    updates = data.get("result", [])
-                    if updates:
-                        update = updates[0]
-                        offsets[bt['token']] = update["update_id"] + 1
-                        msg = update.get("message", {})
-                        text = msg.get("text", "") or msg.get("caption", "")
-                        if text:
-                            print(f"  [轮询] 最新消息内容: {text[:80]}...", flush=True)
-                            match = TG_RENEWAL_PATTERN.search(text)
-                            if match:
-                                code = match.group(0)
-                                print(f"  [轮询] ✅ 匹配到续期码: {code[:20]}...", flush=True)
-                                with open(CODE_FILE, "w") as f:
-                                    f.write(code)
-                                return code
-                            else:
-                                print(f"  [轮询] 最新消息不匹配续期码模式", flush=True)
+# ===================== 获取最新消息 =====================
+def get_latest_message(bot_token):
+    """获取目标 Bot 的最新一条消息，若包含续期码则返回，否则返回 None"""
+    try:
+        proxies = get_proxies()
+        url = f"https://api.telegram.org/bot{bot_token}/getUpdates?limit=1"
+        resp = req_lib.get(url, timeout=15, proxies=proxies) if proxies else req_lib.get(url, timeout=15)
+        data = resp.json()
+        if data.get("ok"):
+            updates = data.get("result", [])
+            if updates:
+                latest = updates[-1]
+                msg = latest.get("message", {})
+                text = msg.get("text", "") or msg.get("caption", "")
+                if text:
+                    print(f"  [最新消息] 内容: {text[:80]}...", flush=True)
+                    match = TG_RENEWAL_PATTERN.search(text)
+                    if match:
+                        code = match.group(0)
+                        print(f"  [最新消息] ✅ 提取到续期码: {code[:20]}...", flush=True)
+                        with open(CODE_FILE, "w") as f:
+                            f.write(code)
+                        return code
                     else:
-                        if elapsed > 0 and elapsed % 60 < poll_interval:
-                            print(f"  [CODE] 轮询中... ({elapsed//60} 分钟)", flush=True)
+                        print(f"  [最新消息] 内容不匹配续期码模式", flush=True)
                 else:
-                    print(f"  [轮询] API 响应异常: {data}", flush=True)
-            except Exception as e:
-                print(f"  [轮询] 请求异常: {e}", flush=True)
-        time.sleep(poll_interval)
-        elapsed += poll_interval
+                    print(f"  [最新消息] 消息无文本内容", flush=True)
+            else:
+                print(f"  [最新消息] Bot 暂无消息", flush=True)
+        else:
+            print(f"  [最新消息] API 响应异常: {data}", flush=True)
+    except Exception as e:
+        print(f"  [最新消息] 获取异常: {e}", flush=True)
     return None
 
 # ===================== 广告关闭 =====================
@@ -824,51 +810,13 @@ def renew_account(account):
         print("  [FORM] 点击 Renew VPS", flush=True)
         page.wait(5)
 
-        # ---------- 准备轮询续期码（后台线程） ----------
-        current_bot = [{"token": bot_token, "label": f"...{bot_token[-6:]}"}] if bot_token else []
-        if not current_bot:
-            raise RuntimeError("当前账号未配置 bot_token")
+        # ---------- 等待 10 秒后提取最新消息 ----------
+        print("  [CODE] 等待 10 秒后读取目标 Bot 最新消息...", flush=True)
+        time.sleep(10)
 
-        code = None
-        poll_thread = None
-        poll_timeout = 1800  # 30 分钟
-        poll_interval = 3    # 轮询间隔 3 秒
-
-        debug_print("启动后台轮询线程...")
-        def poll_target():
-            nonlocal code
-            code = poll_code(current_bot, poll_timeout, poll_interval)
-
-        poll_thread = threading.Thread(target=poll_target, daemon=True)
-        poll_thread.start()
-        
-        # 等待轮询线程打印第一条状态（0 分钟）
-        time.sleep(2)  # 让线程有时间执行并打印
-        print("  [CODE] 等待 @HaxTG_bot 发送续期码...", flush=True)
-
-        # ---------- 等待轮询结果（主线程等待，同时截图） ----------
-        start_wait = time.time()
-        last_screenshot_minute = -1
-        while poll_thread.is_alive() and code is None:
-            elapsed = time.time() - start_wait
-            current_minute = int(elapsed // 60)
-            if current_minute > last_screenshot_minute and current_minute > 0:
-                last_screenshot_minute = current_minute
-                try:
-                    png_path = f"waiting_{phone}_{current_minute}m.png"
-                    take_screenshot(page, png_path, bot_token, chat_id,
-                                    f"⏳ 等待续期码 (已等待 {current_minute} 分钟) - {phone}")
-                except Exception as e:
-                    print(f"  [截图] 等待截图失败: {e}", flush=True)
-            time.sleep(1)
-
+        code = get_latest_message(bot_token)
         if code is None:
-            try:
-                take_screenshot(page, f"timeout_{phone}.png", bot_token, chat_id,
-                                f"⏰ 续期码超时 - {phone}\n请检查 HaxTG_bot 是否发送了续期码到你的 Telegram 账号")
-            except:
-                pass
-            raise RuntimeError("未获取到续期码")
+            raise RuntimeError("未获取到续期码（目标 Bot 最新消息无续期码）")
 
         print(f"  [CODE] 获取到续期码: {code[:20]}***", flush=True)
 
@@ -1019,7 +967,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (轮询取最新消息)", flush=True)
+    print("   HAX 自动续期 (10秒后提取最新消息)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
