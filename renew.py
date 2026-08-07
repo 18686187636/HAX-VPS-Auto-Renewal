@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (整合可跑通登录部分)
-- 使用原始脚本的 Telegram OAuth 登录（已验证可行）
-- Cookie 快速登录（若有效则跳过 OAuth）
-- 代理自动检测 + 出口 IP 验证
-- 算术验证码 + 音频 reCAPTCHA 识别
-- 多 Bot 轮询获取续期码
-- Telegram 通知
-- 兼容 GitHub Actions 无头运行
+HAX VPS Auto-Renewal (增强调试版)
+- 每一步都打印状态，便于定位卡点
+- 支持 ruyipage + Telegram OAuth（原始登录方式）
+- 支持 Cookie 快速登录
+- 代理、验证码、续期码、通知
 """
 import os
 import sys
@@ -20,10 +17,11 @@ import html
 import tempfile
 import random
 import socket
+import traceback
 from datetime import datetime, timezone, timedelta
 
 import requests as req_lib
-from ruyipage import launch, Keys   # 使用原始脚本的库
+from ruyipage import launch, Keys
 
 # 导入可选语音识别
 try:
@@ -40,6 +38,11 @@ HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
 PROXY_ADDR = os.getenv("PROXY_SERVER", "socks5://127.0.0.1:1080")
 CODE_FILE = "renewal_code.txt"
 TG_RENEWAL_PATTERN = re.compile(r'[A-Za-z0-9+/=]{32,}')
+DEBUG = os.getenv("DEBUG", "true").lower() == "true"   # 默认开启调试
+
+def debug_print(*args, **kwargs):
+    if DEBUG:
+        print("[DEBUG]", *args, **kwargs, flush=True)
 
 # ===================== 代理检测（使用 requests） =====================
 def is_port_open(host, port):
@@ -110,19 +113,23 @@ def notify_failed(phone, step, error, bot_token, chat_id):
 # ===================== Telegram OAuth 登录（取自原始脚本，已验证可行） =====================
 def login_with_telegram_original(page, phone):
     """使用原始脚本的方法进行 Telegram OAuth 登录"""
-    print(f"  [LOGIN] 尝试 Telegram OAuth 登录: {phone}")
+    debug_print("进入 login_with_telegram_original")
+    print(f"  [LOGIN] 尝试 Telegram OAuth 登录: {phone}", flush=True)
     try:
-        # 切换到 Telegram OAuth iframe
+        debug_print("准备切换至 OAuth iframe")
         iframe_xpath = "xpath://iframe[contains(@src, 'oauth.telegram.org')]"
         with page.with_frame(iframe_xpath) as frame_page:
+            debug_print("已在 iframe 内")
             btn = frame_page.ele("css:button.tgme_widget_login_button")
             if not btn:
                 raise RuntimeError("未找到 Telegram 登录按钮")
+            debug_print("找到登录按钮，准备点击")
             btn.click_self()
-            print("  [LOGIN] 点击 Telegram 登录按钮")
+            print("  [LOGIN] 点击 Telegram 登录按钮", flush=True)
             page.wait(3)
 
             # 查找 OAuth tab
+            debug_print("查找 OAuth 标签页")
             tab_ids = page.tab_ids
             oauth_tab_id = None
             for tab_id in tab_ids:
@@ -134,53 +141,57 @@ def login_with_telegram_original(page, phone):
             if not oauth_tab_id:
                 raise RuntimeError("未找到 OAuth tab")
 
+            debug_print(f"OAuth tab ID: {oauth_tab_id}")
             oauth_page = page.get_tab(oauth_tab_id)
             oauth_page.activate()
             oauth_page.wait.doc_loaded(timeout=20)
-            print(f"  [LOGIN] OAuth URL: {oauth_page.url}")
+            print(f"  [LOGIN] OAuth URL: {oauth_page.url}", flush=True)
 
             # 输入手机号
+            debug_print("查找手机号输入框")
             phone_input = oauth_page.ele("css:#login-phone-code")
             if not phone_input:
                 raise RuntimeError("未找到手机号输入框")
             phone_input.input(phone, clear=True)
-            print(f"  [LOGIN] 输入手机号: {phone}")
+            print(f"  [LOGIN] 输入手机号: {phone}", flush=True)
             page.wait(2)
 
             # 点击继续
+            debug_print("查找继续按钮")
             continue_btn = oauth_page.ele("text:继续") or oauth_page.ele("css:button[type=submit]") or oauth_page.ele("css:button")
             if continue_btn:
                 continue_btn.click_self()
-                print("  [LOGIN] 点击继续")
+                print("  [LOGIN] 点击继续", flush=True)
 
             # 等待跳转回 vps-info
+            debug_print("等待跳转回 vps-info")
             for _ in range(60):
                 page.wait(2)
                 if "hax.co.id/vps-info" in (page.url or ""):
-                    print("  [LOGIN] 已跳转到 VPS 信息页")
+                    print("  [LOGIN] 已跳转到 VPS 信息页", flush=True)
                     return True
             raise RuntimeError("登录超时，未跳转到 VPS 信息页")
 
     except Exception as e:
-        print(f"  [LOGIN] 失败: {e}")
+        print(f"  [LOGIN] 失败: {e}", flush=True)
+        traceback.print_exc()
         return False
 
 # ===================== 设置 Cookie（适用于 ruyipage） =====================
 def set_session_cookie(page, session_token):
+    debug_print("设置 Cookie")
     try:
-        # ruyipage 可能使用 set_cookies 方法
         page.set_cookies([{"name": "PHPSESSID", "value": session_token, "domain": ".hax.co.id", "path": "/"}])
-        print("  [COOKIE] 通过 set_cookies 成功")
+        print("  [COOKIE] 通过 set_cookies 成功", flush=True)
         return True
     except Exception as e:
-        print(f"  [COOKIE] set_cookies 失败: {e}")
+        debug_print(f"set_cookies 失败: {e}")
     try:
-        # 或使用 JS 注入
         page.run_js(f"document.cookie = 'PHPSESSID={session_token}; path=/; domain=.hax.co.id; SameSite=Lax';")
-        print("  [COOKIE] 通过 JS 注入成功")
+        print("  [COOKIE] 通过 JS 注入成功", flush=True)
         return True
     except Exception as e:
-        print(f"  [COOKIE] JS 注入失败: {e}")
+        debug_print(f"JS 注入失败: {e}")
     return False
 
 # ===================== reCAPTCHA 音频求解（保留原实现，但适配 ruyipage） =====================
@@ -338,10 +349,10 @@ def recognize_audio(mp3_path):
             except Exception:
                 pass
             if text:
-                print(f"  [STT] Google 识别: {text}")
+                print(f"  [STT] Google 识别: {text}", flush=True)
                 return text
         except Exception as e:
-            print(f"  [STT] Google 失败: {e}")
+            print(f"  [STT] Google 失败: {e}", flush=True)
     audio_api_url = os.getenv("AUDIO_API_URL")
     if audio_api_url:
         try:
@@ -352,10 +363,10 @@ def recognize_audio(mp3_path):
                 result = resp.json()
                 text = result.get("text") or result.get("result") or result.get("data")
                 if text:
-                    print(f"  [API] 备用识别: {text}")
+                    print(f"  [API] 备用识别: {text}", flush=True)
                     return text
         except Exception as e:
-            print(f"  [API] 备用识别失败: {e}")
+            print(f"  [API] 备用识别失败: {e}", flush=True)
     return None
 
 def fill_and_verify(page, text):
@@ -384,6 +395,7 @@ def fill_and_verify(page, text):
     return True
 
 def solve_recaptcha(page, timeout=60):
+    debug_print("开始 solve_recaptcha")
     start_time = time.time()
     for _ in range(int(timeout / 2)):
         if find_frame(page, "anchor"):
@@ -391,61 +403,62 @@ def solve_recaptcha(page, timeout=60):
         time.sleep(2)
     while time.time() - start_time < timeout:
         if is_recaptcha_solved(page):
-            print("  [reCAPTCHA] 已通过！")
+            print("  [reCAPTCHA] 已通过！", flush=True)
             return True
         try:
             click_recaptcha_checkbox(page)
         except Exception as e:
-            print(f"  [reCAPTCHA] 点击复选框失败: {e}")
+            print(f"  [reCAPTCHA] 点击复选框失败: {e}", flush=True)
             time.sleep(2)
             continue
         time.sleep(2)
         if is_recaptcha_solved(page):
-            print("  [reCAPTCHA] 点击后直接通过！")
+            print("  [reCAPTCHA] 点击后直接通过！", flush=True)
             return True
         if not switch_to_audio(page):
             time.sleep(2)
             if not switch_to_audio(page):
-                print("  [reCAPTCHA] 无法切换到音频模式")
+                print("  [reCAPTCHA] 无法切换到音频模式", flush=True)
                 time.sleep(random.uniform(2, 4))
                 continue
         time.sleep(random.uniform(2, 4))
         audio_url = get_audio_url(page)
         if not audio_url:
-            print("  [reCAPTCHA] 未找到音频 URL，重试...")
+            print("  [reCAPTCHA] 未找到音频 URL，重试...", flush=True)
             time.sleep(random.uniform(3, 6))
             continue
-        print(f"  [reCAPTCHA] 音频 URL: {audio_url[:80]}...")
+        print(f"  [reCAPTCHA] 音频 URL: {audio_url[:80]}...", flush=True)
         mp3_path = download_audio(audio_url)
         if not mp3_path:
-            print("  [reCAPTCHA] 音频下载失败，重试...")
+            print("  [reCAPTCHA] 音频下载失败，重试...", flush=True)
             time.sleep(random.uniform(3, 6))
             continue
-        print(f"  [reCAPTCHA] 音频已下载: {os.path.basename(mp3_path)}")
+        print(f"  [reCAPTCHA] 音频已下载: {os.path.basename(mp3_path)}", flush=True)
         text = recognize_audio(mp3_path)
         try:
             os.remove(mp3_path)
         except Exception:
             pass
         if not text:
-            print("  [reCAPTCHA] 无法识别语音，重试...")
+            print("  [reCAPTCHA] 无法识别语音，重试...", flush=True)
             time.sleep(random.uniform(3, 6))
             continue
-        print(f"  [reCAPTCHA] 识别结果: [{text}]")
+        print(f"  [reCAPTCHA] 识别结果: [{text}]", flush=True)
         fill_and_verify(page, text)
         time.sleep(5)
         if is_recaptcha_solved(page):
-            print("  [reCAPTCHA] 语音验证通过！")
+            print("  [reCAPTCHA] 语音验证通过！", flush=True)
             return True
         else:
-            print("  [reCAPTCHA] 验证未通过，重新获取音频...")
+            print("  [reCAPTCHA] 验证未通过，重新获取音频...", flush=True)
             time.sleep(random.uniform(2, 4))
-    print(f"  [reCAPTCHA] {timeout} 秒超时")
+    print(f"  [reCAPTCHA] {timeout} 秒超时", flush=True)
     return False
 
 # ===================== 算术验证码 =====================
 def solve_arithmetic_captcha(page):
-    print("  [CAPTCHA] 识别算式验证码...")
+    debug_print("开始 solve_arithmetic_captcha")
+    print("  [CAPTCHA] 识别算式验证码...", flush=True)
     page.wait(3)
     img_urls_str = page.run_js("""(() => {
         const all = document.querySelectorAll("img");
@@ -462,14 +475,14 @@ def solve_arithmetic_captcha(page):
         all_imgs = json.loads(img_urls_str)
     except Exception:
         all_imgs = []
-    print(f"  [CAPTCHA] 页面共 {len(all_imgs)} 张图片")
+    print(f"  [CAPTCHA] 页面共 {len(all_imgs)} 张图片", flush=True)
     captcha_urls = []
     for img in all_imgs:
         s = img.get('src', '')
         w, h = img.get('w', 0), img.get('h', 0)
         if 'hax.co.id/img/temp/' in s and 15 <= w <= 50 and 15 <= h <= 50:
             captcha_urls.append(s)
-    print(f"  [CAPTCHA] 找到 {len(captcha_urls)} 张验证码图片")
+    print(f"  [CAPTCHA] 找到 {len(captcha_urls)} 张验证码图片", flush=True)
     if len(captcha_urls) < 2:
         for img in all_imgs:
             s = img.get('src', '')
@@ -478,13 +491,13 @@ def solve_arithmetic_captcha(page):
                 if w <= 50 and h <= 50:
                     captcha_urls.append(s)
     if len(captcha_urls) < 2:
-        print(f"  [CAPTCHA] 图片不足，使用所有非logo图片")
+        print(f"  [CAPTCHA] 图片不足，使用所有非logo图片", flush=True)
         for img in all_imgs:
             s = img.get('src', '')
             if s and not s.startswith('data:') and 'logo' not in s.lower():
                 captcha_urls.append(s)
         captcha_urls = captcha_urls[:2]
-    print(f"  [CAPTCHA] URL: {[u.split('/')[-1][:30] for u in captcha_urls]}")
+    print(f"  [CAPTCHA] URL: {[u.split('/')[-1][:30] for u in captcha_urls]}", flush=True)
     digits = []
     for url in captcha_urls[:2]:
         after_dash = url.rsplit('-', 1)[-1] if '-' in url else ''
@@ -492,12 +505,12 @@ def solve_arithmetic_captcha(page):
         if first_char.isdigit():
             digit = int(first_char)
             digits.append(digit)
-            print(f"  [CAPTCHA] URL提取数字: {digit}")
+            print(f"  [CAPTCHA] URL提取数字: {digit}", flush=True)
         else:
-            print(f"  [CAPTCHA] URL提取失败，使用默认值0")
+            print(f"  [CAPTCHA] URL提取失败，使用默认值0", flush=True)
             digits.append(0)
     if len(digits) < 2:
-        print(f"  [CAPTCHA] 识别失败: {digits}")
+        print(f"  [CAPTCHA] 识别失败: {digits}", flush=True)
         return None
     op_text = page.run_js("""(() => {
         const groups = document.querySelectorAll('.form-group.row');
@@ -519,7 +532,7 @@ def solve_arithmetic_captcha(page):
         }
         return '';
     })()""")
-    print(f"  [CAPTCHA] 运算符: [{op_text}]")
+    print(f"  [CAPTCHA] 运算符: [{op_text}]", flush=True)
     op = "+"
     if "×" in op_text or "*" in op_text or "x" in op_text or "X" in op_text:
         op = "*"
@@ -527,11 +540,12 @@ def solve_arithmetic_captcha(page):
         op = "-"
     result = eval(f"{digits[0]} {op} {digits[1]}")
     op_symbol = "×" if op == "*" else ("−" if op == "-" else "+")
-    print(f"  [CAPTCHA] 算式: {digits[0]} {op_symbol} {digits[1]} = {result}")
+    print(f"  [CAPTCHA] 算式: {digits[0]} {op_symbol} {digits[1]} = {result}", flush=True)
     return result
 
 # ===================== 续期码获取（多 Bot 轮询） =====================
 def get_renewal_code_from_telegram(bot_tokens, timeout=1800, poll_interval=10):
+    debug_print(f"进入 get_renewal_code_from_telegram，超时 {timeout}s")
     offsets = {}
     for bt in bot_tokens:
         try:
@@ -574,7 +588,7 @@ def get_renewal_code_from_telegram(bot_tokens, timeout=1800, poll_interval=10):
         time.sleep(poll_interval)
         elapsed += poll_interval
         if elapsed % 60 < poll_interval:
-            print(f"  [CODE] 等待中... ({elapsed//60} 分钟)")
+            print(f"  [CODE] 等待中... ({elapsed//60} 分钟)", flush=True)
     return "", None
 
 # ===================== 单账号续期主流程（整合原始登录） =====================
@@ -585,65 +599,77 @@ def renew_account(account):
     chat_id = account.get("chat_id")
 
     if not phone:
-        print("  ⚠️ 账号缺少手机号，跳过")
+        print("  ⚠️ 账号缺少手机号，跳过", flush=True)
         return False
 
-    print(f"\n{'='*60}\n  续期: {phone}\n{'='*60}")
+    print(f"\n{'='*60}\n  续期: {phone}\n{'='*60}", flush=True)
 
     # 代理检测
+    debug_print("开始代理检测")
     proxies = get_proxies()
     if proxies:
-        print(f"🔗 代理地址: {PROXY_ADDR}")
+        print(f"🔗 代理地址: {PROXY_ADDR}", flush=True)
         ok, ip = check_proxy_ip(proxies)
         if ok:
-            print(f"📍 代理出口 IP: {ip}")
+            print(f"📍 代理出口 IP: {ip}", flush=True)
         else:
-            print("⚠️ 代理出口 IP 获取失败，将使用直连")
+            print("⚠️ 代理出口 IP 获取失败，将使用直连", flush=True)
             proxies = None
     else:
-        print("🔗 代理不可用，使用直连")
+        print("🔗 代理不可用，使用直连", flush=True)
 
     page = None
     try:
-        # 使用 ruyipage 的 launch 启动浏览器（支持 headless 和代理）
-        # 注意：ruyipage 的 launch 参数可能不同，我们尝试传递常见参数
+        # 使用 ruyipage 的 launch 启动浏览器
+        debug_print("准备启动浏览器...")
         launch_args = {
             "headless": HEADLESS,
             "window_size": (1366, 768),
         }
+        # 如果代理可用，尝试添加代理（ruyipage 可能用 'proxy' 参数）
         if proxies is not None:
-            # 尝试设置代理，ruyipage 可能通过 ChromiumOptions 或直接参数支持
-            # 这里假设 launch 支持 proxy 参数
+            # 注意：ruyipage 的 launch 可能接受 'proxy' 参数，格式为 "socks5://127.0.0.1:1080"
             launch_args["proxy"] = PROXY_ADDR
+            debug_print(f"设置代理参数: {PROXY_ADDR}")
+        else:
+            debug_print("不使用代理")
+        print("  [BROWSER] 正在启动浏览器（此步骤可能较慢）...", flush=True)
         page = launch(**launch_args)
+        debug_print("浏览器启动成功，开始访问登录页")
         page.get("https://hax.co.id/login")
+        debug_print("登录页加载完成")
         page.wait.doc_loaded(timeout=20)
         page.wait(5)
+        debug_print("等待完成")
 
         # ---------- 尝试 Cookie 登录 ----------
         login_success = False
         if session_token:
-            print("  [LOGIN] 尝试使用 session_token 快速登录...")
+            debug_print("尝试 Cookie 登录")
+            print("  [LOGIN] 尝试使用 session_token 快速登录...", flush=True)
             page.get("https://hax.co.id/login")
             set_session_cookie(page, session_token)
+            debug_print("Cookie 设置完成，跳转 vps-info")
             page.get("https://hax.co.id/vps-info")
             page.wait.doc_loaded(timeout=15)
             if "login" not in page.url.lower():
-                print("  ✅ Cookie 登录成功")
+                print("  ✅ Cookie 登录成功", flush=True)
                 login_success = True
             else:
-                print("  ⚠️ Cookie 无效或已过期")
+                print("  ⚠️ Cookie 无效或已过期", flush=True)
 
         if not login_success:
-            print("  [LOGIN] 执行 Telegram OAuth 登录...")
+            debug_print("Cookie 登录失败，执行 OAuth")
+            print("  [LOGIN] 执行 Telegram OAuth 登录...", flush=True)
             login_success = login_with_telegram_original(page, phone)
             if not login_success:
                 raise RuntimeError("Telegram 登录失败")
 
-        print("  ✅ 登录成功，开始续期流程")
+        print("  ✅ 登录成功，开始续期流程", flush=True)
 
         # ---------- 处理广告（使用原始脚本方式） ----------
-        print("  [AD] 等待并关闭广告...")
+        debug_print("处理广告")
+        print("  [AD] 等待并关闭广告...", flush=True)
         page.wait(3)
         try:
             page.actions.press(Keys.ESCAPE).perform()
@@ -662,6 +688,7 @@ def renew_account(account):
         page.wait(3)
 
         # ---------- 导航到续期 ----------
+        debug_print("导航到 VPS 续期")
         vps_menu = None
         for _ in range(5):
             try:
@@ -680,31 +707,33 @@ def renew_account(account):
         if not renew_btn:
             raise RuntimeError("未找到 VPS Renew 按钮")
         renew_btn.click_self(by_js=True)
-        print("  [NAV] 点击 VPS Renew")
+        print("  [NAV] 点击 VPS Renew", flush=True)
         page.wait(5)
 
         # ---------- 填写表单 ----------
+        debug_print("填写续期表单")
         web_input = page.ele("css:#web_address")
         if web_input:
             web_input.input("hax.co.id", clear=True)
-            print("  [FORM] 输入域名")
+            print("  [FORM] 输入域名", flush=True)
         agreement = page.ele('css:input[name="agreement"][value="yes"]')
         if agreement and not agreement.is_checked:
             agreement.click_self(by_js=True)
-            print("  [FORM] 勾选协议")
+            print("  [FORM] 勾选协议", flush=True)
 
-        print("  [CF] 等待 CloudFlare 验证 (60s)...")
+        print("  [CF] 等待 CloudFlare 验证 (60s)...", flush=True)
         page.wait(60)
 
         renew_vps_btn = page.ele("css:button[name=submit_button][type=button].btn-primary")
         if not renew_vps_btn:
             raise RuntimeError("未找到 Renew VPS 按钮")
         renew_vps_btn.click_self(by_js=True)
-        print("  [FORM] 点击 Renew VPS")
+        print("  [FORM] 点击 Renew VPS", flush=True)
         page.wait(5)
 
         # ---------- 获取续期码 ----------
-        print("  [CODE] 等待 @HaxTG_bot 发送续期码...")
+        debug_print("开始获取续期码")
+        print("  [CODE] 等待 @HaxTG_bot 发送续期码...", flush=True)
         all_bots = []
         seen = set()
         for acc in ACCOUNTS:
@@ -721,12 +750,13 @@ def renew_account(account):
 
         try:
             decoded = base64.b64decode(code).decode('utf-8')
-            print(f"  [CODE] 解码后: {decoded[:20]}***")
+            print(f"  [CODE] 解码后: {decoded[:20]}***", flush=True)
         except:
             decoded = code
-            print(f"  [CODE] 非 Base64，直接使用: {decoded[:20]}***")
+            print(f"  [CODE] 非 Base64，直接使用: {decoded[:20]}***", flush=True)
 
         # ---------- 进入续期码输入页 ----------
+        debug_print("进入续期码输入页")
         renew_code_link = None
         for selector in [
             'css:a.btn[href="/vps-renew-code"]',
@@ -742,19 +772,21 @@ def renew_account(account):
         if not renew_code_link:
             raise RuntimeError("未找到 INPUT RENEW CODE 按钮")
         renew_code_link.click_self(by_js=True)
-        print("  [NAV] 点击 INPUT RENEW CODE")
+        print("  [NAV] 点击 INPUT RENEW CODE", flush=True)
         page.wait.doc_loaded(timeout=15)
         page.wait(3)
 
         # ---------- 算术验证码 ----------
+        debug_print("开始算术验证码")
         captcha_result = solve_arithmetic_captcha(page)
         if captcha_result is not None:
             code_input = page.ele("css:#captcha")
             if code_input:
                 code_input.input(str(captcha_result), clear=True)
-                print(f"  [CAPTCHA] 输入结果: {captcha_result}")
+                print(f"  [CAPTCHA] 输入结果: {captcha_result}", flush=True)
 
         # 填入续期码
+        debug_print("填入续期码")
         vcode_input = None
         for selector in ["css:input.form-control:not(#captcha)", "css:input[name=code]", "css:input#code"]:
             try:
@@ -772,19 +804,21 @@ def renew_account(account):
             except Exception:
                 pass
             vcode_input.input(decoded, clear=True)
-            print(f"  [CODE] 输入 renewal code: {decoded[:10]}***")
+            print(f"  [CODE] 输入 renewal code: {decoded[:10]}***", flush=True)
 
         # ---------- reCAPTCHA ----------
-        print("  [reCAPTCHA] 处理音频验证...")
+        debug_print("开始 reCAPTCHA")
+        print("  [reCAPTCHA] 处理音频验证...", flush=True)
         recaptcha_solved = solve_recaptcha(page, timeout=90)
         if not recaptcha_solved:
-            print("  [reCAPTCHA] 自动解决失败，等待用户手动处理...")
-            print("  [reCAPTCHA] 请在浏览器中手动完成验证（60秒）")
+            print("  [reCAPTCHA] 自动解决失败，等待用户手动处理...", flush=True)
+            print("  [reCAPTCHA] 请在浏览器中手动完成验证（60秒）", flush=True)
             page.wait(60)
             recaptcha_solved = is_recaptcha_solved(page)
 
         # ---------- 提交 ----------
-        print("  [SUBMIT] 提交续期...")
+        debug_print("提交续期")
+        print("  [SUBMIT] 提交续期...", flush=True)
         submit_btn = None
         for selector in [
             "css:button[name=submit_button]",
@@ -799,19 +833,20 @@ def renew_account(account):
             except Exception:
                 pass
         if not submit_btn:
-            print("  [SUBMIT] 未找到提交按钮，列出所有 button...")
+            print("  [SUBMIT] 未找到提交按钮，列出所有 button...", flush=True)
             all_btns = page.eles("css:button")
             for btn in all_btns:
-                print(f"    button: name={btn.attr('name')} class={btn.attr('class')} text={btn.text.strip()[:50]}")
+                print(f"    button: name={btn.attr('name')} class={btn.attr('class')} text={btn.text.strip()[:50]}", flush=True)
             raise RuntimeError("未找到提交按钮")
         try:
             submit_btn.click_self(by_js=True)
         except Exception:
             submit_btn.click_self()
-        print("  [SUBMIT] 已点击提交，等待结果...")
+        print("  [SUBMIT] 已点击提交，等待结果...", flush=True)
         time.sleep(60)
 
         # ---------- 检查结果 ----------
+        debug_print("检查续期结果")
         page.wait.doc_loaded(timeout=15)
         page.wait(3)
         result_text = page.run_js("document.body.innerText") or ""
@@ -828,7 +863,7 @@ def renew_account(account):
         ]
         if any(kw in result_lower for kw in success_keywords):
             is_success = True
-            print("  [RESULT] 检测到续期成功！")
+            print("  [RESULT] 检测到续期成功！", flush=True)
             for pat in [
                 r"until\s+([A-Za-z]+\s+\d{1,2},?\s*\d{4})",
                 r"[Ee]xpir(?:e|y)[:\s]*(\d{4}-\d{2}-\d{2})",
@@ -838,7 +873,7 @@ def renew_account(account):
                 m = re.search(pat, result_text)
                 if m:
                     expiry_date = m.group(1)
-                    print(f"  [RESULT] 到期日: {expiry_date}")
+                    print(f"  [RESULT] 到期日: {expiry_date}", flush=True)
                     break
 
         if is_success:
@@ -847,36 +882,39 @@ def renew_account(account):
         else:
             error_msg = "Captcha 验证失败" if "captcha" in result_lower else "页面未显示明确结果"
             notify_failed(phone, "结果页", error_msg, bot_token, chat_id)
-            print(f"  [RESULT] 失败: {error_msg}")
+            print(f"  [RESULT] 失败: {error_msg}", flush=True)
             return False
 
     except Exception as e:
-        print(f"  ❌ 异常: {e}")
+        print(f"  ❌ 异常: {e}", flush=True)
+        traceback.print_exc()
         notify_failed(phone, "执行异常", str(e), bot_token, chat_id)
         return False
     finally:
         if page:
             try:
+                debug_print("关闭浏览器")
                 page.quit()
             except Exception:
                 pass
 
 # ===================== 主入口 =====================
 if __name__ == "__main__":
-    print("#########################")
-    print("   HAX 自动续期 (整合可跑通登录)")
-    print("#########################")
+    print("#########################", flush=True)
+    print("   HAX 自动续期 (增强调试版)", flush=True)
+    print("#########################", flush=True)
     if not ACCOUNTS:
-        print("❌ 未加载账号，请设置 ACCOUNTS_JSON")
+        print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
         sys.exit(1)
-    print(f"✅ 加载了 {len(ACCOUNTS)} 个账号")
+    print(f"✅ 加载了 {len(ACCOUNTS)} 个账号", flush=True)
     success = 0
     for idx, acc in enumerate(ACCOUNTS, 1):
-        print(f"\n============================== 处理第 {idx}/{len(ACCOUNTS)} 个账号 ==============================")
+        print(f"\n============================== 处理第 {idx}/{len(ACCOUNTS)} 个账号 ==============================", flush=True)
         try:
             if renew_account(acc):
                 success += 1
         except Exception as e:
-            print(f"  ⚠️ 账号处理异常: {e}")
+            print(f"  ⚠️ 账号处理异常: {e}", flush=True)
+            traceback.print_exc()
         time.sleep(random.randint(10, 30))
-    print(f"\n{'='*60}\n完成: {success}/{len(ACCOUNTS)} 个账号续期成功\n{'='*60}")
+    print(f"\n{'='*60}\n完成: {success}/{len(ACCOUNTS)} 个账号续期成功\n{'='*60}", flush=True)
