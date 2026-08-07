@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (多账号独立 Bot 轮询版 - 修正时序)
+HAX VPS Auto-Renewal (多账号独立 Bot 轮询版 - 提前轮询)
 """
 import os
 import sys
@@ -14,6 +14,7 @@ import tempfile
 import random
 import socket
 import traceback
+import threading
 from datetime import datetime, timezone, timedelta
 
 import requests as req_lib
@@ -611,14 +612,12 @@ def solve_arithmetic_captcha(page):
     print(f"  [CAPTCHA] 算式: {digits[0]} {op_symbol} {digits[1]} = {result}", flush=True)
     return result
 
-# ===================== 续期码获取（仅轮询当前账号的 Bot） =====================
-def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, timeout=1800, poll_interval=10):
-    """
-    仅轮询指定的 bot_tokens（当前账号的 Bot）
-    """
+# ===================== 续期码轮询（线程安全，无截图） =====================
+def poll_code(bot_tokens, timeout, poll_interval):
+    """轮询 Bot 获取续期码（独立线程调用，不操作 page）"""
     if not bot_tokens:
-        return "", None
-    debug_print(f"进入 get_renewal_code_from_telegram，超时 {timeout}s，监听 {len(bot_tokens)} 个 Bot")
+        return None
+    debug_print(f"轮询线程启动，超时 {timeout}s，监听 {len(bot_tokens)} 个 Bot")
     offsets = {}
     for bt in bot_tokens:
         try:
@@ -633,18 +632,7 @@ def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, 
         except Exception:
             offsets[bt['token']] = 0
     elapsed = 0
-    code = ""
-    last_screenshot_minute = -1
     while elapsed < timeout:
-        current_minute = elapsed // 60
-        if current_minute > last_screenshot_minute and current_minute > 0:
-            last_screenshot_minute = current_minute
-            try:
-                png_path = f"waiting_{phone}_{current_minute}m.png"
-                take_screenshot(page, png_path, bot_token, chat_id,
-                                f"⏳ 等待续期码 (已等待 {current_minute} 分钟) - {phone}")
-            except Exception as e:
-                print(f"  [截图] 等待截图失败: {e}", flush=True)
         for bt in bot_tokens:
             offset = offsets.get(bt['token'], 0)
             try:
@@ -663,16 +651,14 @@ def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, 
                                 code = match.group(0)
                                 with open(CODE_FILE, "w") as f:
                                     f.write(code)
-                                return code, bt.get("label", bt['token'][-6:])
+                                return code
             except Exception:
                 pass
-        if code:
-            break
         time.sleep(poll_interval)
         elapsed += poll_interval
         if elapsed % 60 < poll_interval:
-            print(f"  [CODE] 等待中... ({elapsed//60} 分钟)", flush=True)
-    return "", None
+            print(f"  [CODE] 轮询中... ({elapsed//60} 分钟)", flush=True)
+    return None
 
 # ===================== 广告关闭 =====================
 def close_ads(page):
@@ -830,6 +816,26 @@ def renew_account(account):
         print("  [CF] 等待 CloudFlare 验证 (60s)...", flush=True)
         page.wait(60)
 
+        # ---------- 准备轮询续期码（后台线程） ----------
+        current_bot = [{"token": bot_token, "label": f"...{bot_token[-6:]}"}] if bot_token else []
+        if not current_bot:
+            raise RuntimeError("当前账号未配置 bot_token")
+
+        code = None
+        poll_thread = None
+        poll_timeout = 1800  # 30 分钟
+        poll_interval = 10
+
+        # 启动轮询线程（在点击前就开始）
+        debug_print("启动后台轮询线程...")
+        def poll_target():
+            nonlocal code
+            code = poll_code(current_bot, poll_timeout, poll_interval)
+
+        poll_thread = threading.Thread(target=poll_target, daemon=True)
+        poll_thread.start()
+        debug_print("轮询线程已启动，继续执行点击...")
+
         # ---------- 点击 Renew VPS ----------
         renew_vps_btn = page.ele("css:button[name=submit_button][type=button].btn-primary")
         if not renew_vps_btn:
@@ -838,17 +844,27 @@ def renew_account(account):
         print("  [FORM] 点击 Renew VPS", flush=True)
         page.wait(5)
 
-        # ---------- 🟢 立即获取续期码（仅使用当前账号的 Bot） ----------
-        debug_print("开始获取续期码（仅轮询当前账号的 Bot）")
+        # ---------- 等待轮询结果（最多 30 分钟） ----------
         print("  [CODE] 等待 @HaxTG_bot 发送续期码...", flush=True)
-        current_bot = [{"token": bot_token, "label": f"...{bot_token[-6:]}"}] if bot_token else []
-        if not current_bot:
-            raise RuntimeError("当前账号未配置 bot_token")
-        code, source = get_renewal_code_from_telegram(
-            current_bot, page, phone, bot_token, chat_id,
-            timeout=1800, poll_interval=10
-        )
-        if not code:
+        start_wait = time.time()
+        last_screenshot_minute = -1
+        while poll_thread.is_alive() and code is None:
+            elapsed = time.time() - start_wait
+            current_minute = int(elapsed // 60)
+            if current_minute > last_screenshot_minute and current_minute > 0:
+                last_screenshot_minute = current_minute
+                # 主线程截图（每分钟一次）
+                try:
+                    png_path = f"waiting_{phone}_{current_minute}m.png"
+                    take_screenshot(page, png_path, bot_token, chat_id,
+                                    f"⏳ 等待续期码 (已等待 {current_minute} 分钟) - {phone}")
+                except Exception as e:
+                    print(f"  [截图] 等待截图失败: {e}", flush=True)
+            time.sleep(1)  # 避免高 CPU
+
+        # 线程超时或已获取到 code
+        if code is None:
+            # 超时
             try:
                 take_screenshot(page, f"timeout_{phone}.png", bot_token, chat_id,
                                 f"⏰ 续期码超时 - {phone}\n请检查 HaxTG_bot 是否发送了续期码到你的 Telegram 账号")
@@ -858,7 +874,7 @@ def renew_account(account):
 
         print(f"  [CODE] 获取到续期码: {code[:20]}***", flush=True)
 
-        # ---------- 现在关闭广告（不影响续期码获取） ----------
+        # ---------- 关闭广告（后续步骤） ----------
         close_ads(page)
 
         # ---------- 进入续期码输入页 ----------
@@ -1005,7 +1021,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (多账号独立 Bot 轮询版 - 修正时序)", flush=True)
+    print("   HAX 自动续期 (提前轮询版)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
