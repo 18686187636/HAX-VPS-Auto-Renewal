@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (增强弹窗清理 + 提交前截图 + 不解码续期码)
+HAX VPS Auto-Renewal (最终稳定版 - 含完整续期码轮询)
+- Cookie 快速登录 + Telegram OAuth 回退
+- 算术验证码 + 音频 reCAPTCHA
+- 多 Bot 轮询获取续期码
+- 广告自动关闭
+- Telegram 通知 + 截图
+- 支持 GitHub Actions 无头运行
 """
 import os
 import sys
@@ -34,7 +40,7 @@ PROXY_ADDR = os.getenv("PROXY_SERVER", "socks5://127.0.0.1:1080")
 CODE_FILE = "renewal_code.txt"
 TG_RENEWAL_PATTERN = re.compile(r'[A-Za-z0-9+/=]{32,}')
 DEBUG = os.getenv("DEBUG", "true").lower() == "true"
-SEND_SCREENSHOTS = os.getenv("SEND_SCREENSHOTS", "true").lower() == "true"   # 已修复括号
+SEND_SCREENSHOTS = os.getenv("SEND_SCREENSHOTS", "true").lower() == "true"
 
 def debug_print(*args, **kwargs):
     if DEBUG:
@@ -262,7 +268,7 @@ def set_session_cookie(page, session_token):
         debug_print(f"JS 注入失败: {e}")
     return False
 
-# ===================== reCAPTCHA 音频求解（完整） =====================
+# ===================== reCAPTCHA 音频求解 =====================
 def find_frame(page, keyword):
     try:
         frames = page.get_frames()
@@ -611,7 +617,7 @@ def solve_arithmetic_captcha(page):
     print(f"  [CAPTCHA] 算式: {digits[0]} {op_symbol} {digits[1]} = {result}", flush=True)
     return result
 
-# ===================== 续期码获取（含等待截图） =====================
+# ===================== 续期码获取（多 Bot 轮询，含等待截图） =====================
 def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, timeout=1800, poll_interval=10):
     debug_print(f"进入 get_renewal_code_from_telegram，超时 {timeout}s")
     offsets = {}
@@ -669,9 +675,8 @@ def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, 
             print(f"  [CODE] 等待中... ({elapsed//60} 分钟)", flush=True)
     return "", None
 
-# ===================== 增强版广告关闭（含 JS 移除） =====================
+# ===================== 广告关闭（增强版） =====================
 def close_ads(page):
-    """按照本地脚本方式关闭广告，并额外用 JS 移除遮挡元素"""
     print("  [AD] 等待并关闭广告...")
     page.wait(3)
     try:
@@ -689,32 +694,6 @@ def close_ads(page):
         except Exception:
             pass
     page.wait(3)
-    
-    # 额外通过 JS 移除常见弹窗元素
-    js_remove = """
-    (function() {
-        var selectors = [
-            '.overlay', '.modal-backdrop', '.popup-overlay', 
-            '[class*="overlay"]', '[class*="modal"]', '[class*="popup"]',
-            '.ad-container', '.ad-wrapper', '.banner-ad'
-        ];
-        selectors.forEach(function(sel) {
-            document.querySelectorAll(sel).forEach(function(el) { el.remove(); });
-        });
-        var all = document.querySelectorAll('*');
-        all.forEach(function(el) {
-            var style = getComputedStyle(el);
-            if (style.position === 'fixed' && parseInt(style.zIndex) > 999) {
-                el.remove();
-            }
-        });
-    })();
-    """
-    try:
-        page.run_js(js_remove)
-        time.sleep(1)
-    except Exception as e:
-        debug_print(f"JS移除弹窗失败: {e}")
 
 # ===================== 处理 Consent 弹窗 =====================
 def handle_consent(page):
@@ -787,18 +766,13 @@ def renew_account(account):
             debug_print("Cookie 设置完成，跳转 vps-info")
             page.get("https://hax.co.id/vps-info")
             page.wait.doc_loaded(timeout=15)
-            page.get("https://hax.co.id/vps-info")  # 强制刷新
+            page.get("https://hax.co.id/vps-info")
             page.wait.doc_loaded(timeout=10)
             if is_logged_in(page):
                 print("  ✅ Cookie 登录成功", flush=True)
                 login_success = True
             else:
                 print("  ⚠️ Cookie 未生效，将执行 OAuth", flush=True)
-                # try:
-                #    take_screenshot(page, f"cookie_fail_{phone}.png", bot_token, chat_id,
-                #                   f"❌ Cookie 登录失败 - {phone}")
-                # except:
-                #   pass
 
         if not login_success:
             debug_print("Cookie 登录失败，执行 OAuth")
@@ -807,7 +781,6 @@ def renew_account(account):
             if not login_success:
                 raise RuntimeError("Telegram 登录失败")
 
-        # 再次确认登录
         if not is_logged_in(page):
             print("  ⚠️ 登录后未检测到登录状态，重新加载...", flush=True)
             page.get("https://hax.co.id/vps-info")
@@ -819,17 +792,10 @@ def renew_account(account):
 
         print("  ✅ 登录成功，开始续期流程", flush=True)
 
-        # ----- 1. 处理 Consent 和广告 -----
         handle_consent(page)
         close_ads(page)
 
-        # 登录成功截图
-        try:
-            take_screenshot(page, f"login_success_{phone}.png", bot_token, chat_id, f"✅ 登录成功 - {phone}")
-        except Exception as e:
-            print(f"  [截图] 登录截图失败: {e}", flush=True)
-
-        # ---------- 导航到续期 ----------
+        # 导航到续期
         debug_print("导航到 VPS 续期")
         vps_menu = None
         for _ in range(5):
@@ -852,7 +818,7 @@ def renew_account(account):
         print("  [NAV] 点击 VPS Renew", flush=True)
         page.wait(5)
 
-        # ---------- 填写表单 ----------
+        # 填写表单
         debug_print("填写续期表单")
         web_input = page.ele("css:#web_address")
         if web_input:
@@ -873,13 +839,7 @@ def renew_account(account):
         print("  [FORM] 点击 Renew VPS", flush=True)
         page.wait(5)
 
-        # ----- 2. 点击 Renew VPS 后关闭广告 -----
         close_ads(page)
-
-        try:
-            take_screenshot(page, f"renew_vps_{phone}.png", bot_token, chat_id, f"🔄 已点击 Renew VPS - {phone}")
-        except Exception as e:
-            print(f"  [截图] Renew VPS 截图失败: {e}", flush=True)
 
         # ---------- 获取续期码 ----------
         debug_print("开始获取续期码")
@@ -906,9 +866,7 @@ def renew_account(account):
                 pass
             raise RuntimeError("未获取到续期码")
 
-        # ⚠️ 修改：不进行解码，直接使用原始 Base64 字符串
-        print(f"  [CODE] 使用原始码: {code[:20]}***", flush=True)
-        renewal_code_to_input = code
+        print(f"  [CODE] 获取到续期码: {code[:20]}***", flush=True)
 
         # ---------- 进入续期码输入页 ----------
         debug_print("进入续期码输入页")
@@ -931,7 +889,6 @@ def renew_account(account):
         page.wait.doc_loaded(timeout=15)
         page.wait(3)
 
-        # ----- 3. 进入续期码页后关闭广告 -----
         close_ads(page)
 
         # ---------- 算术验证码 ----------
@@ -942,7 +899,7 @@ def renew_account(account):
                 code_input.input(str(captcha_result), clear=True)
                 print(f"  [CAPTCHA] 输入结果: {captcha_result}", flush=True)
 
-        # 填入续期码（直接使用原始 Base64）
+        # 填入续期码
         debug_print("填入续期码")
         vcode_input = None
         for selector in ["css:input.form-control:not(#captcha)", "css:input[name=code]", "css:input#code"]:
@@ -953,15 +910,8 @@ def renew_account(account):
             except Exception:
                 pass
         if vcode_input:
-            try:
-                page.run_js(
-                    "(() => { const el = document.querySelector('input.form-control:not(#captcha)'); if (el) el.scrollIntoView({behavior: 'instant', block: 'center'}); })()"
-                )
-                page.wait(1)
-            except Exception:
-                pass
-            vcode_input.input(renewal_code_to_input, clear=True)
-            print(f"  [CODE] 输入 renewal code (原始Base64): {renewal_code_to_input[:20]}***", flush=True)
+            vcode_input.input(code, clear=True)
+            print(f"  [CODE] 输入续期码: {code[:15]}***", flush=True)
 
         # ---------- reCAPTCHA ----------
         debug_print("开始 reCAPTCHA")
@@ -973,19 +923,10 @@ def renew_account(account):
             page.wait(60)
             recaptcha_solved = is_recaptcha_solved(page)
 
-        # ---------- 提交续期（增加提交前截图） ----------
+        # ---------- 提交 ----------
         debug_print("提交续期")
         print("  [SUBMIT] 提交续期...", flush=True)
-        close_ads(page)  # 先关闭可能遮挡的广告
-
-        # 在点击提交按钮之前截图，记录表单状态
-        # try:
-        #    take_screenshot(page, f"before_submit_{phone}.png", bot_token, chat_id,
-        #                   f"📝 提交前截图 - {phone} (已填好续期码和reCAPTCHA)")
-        # except Exception as e:
-        #   print(f"  [截图] 提交前截图失败: {e}", flush=True)
-
-        # 查找提交按钮
+        close_ads(page)
         submit_btn = None
         for selector in [
             "css:button[name=submit_button]",
@@ -1012,21 +953,13 @@ def renew_account(account):
         print("  [SUBMIT] 已点击提交，等待结果...", flush=True)
         time.sleep(60)
 
-        # ---------- 检查结果（增强弹窗清理） ----------
+        # ---------- 检查结果 ----------
         debug_print("检查续期结果")
-        # 多次关闭广告，确保弹窗被清除
         for _ in range(3):
             close_ads(page)
             time.sleep(1)
-        # 额外使用 JS 移除所有可能的遮挡
-        page.run_js("""
-            document.querySelectorAll('.overlay, .modal, .popup, [class*="overlay"], [class*="modal"], [class*="popup"]')
-                .forEach(el => el.remove());
-        """)
-        time.sleep(2)
         page.wait.doc_loaded(timeout=15)
         page.wait(3)
-        # 再次关闭一次
         close_ads(page)
         result_text = page.run_js("document.body.innerText") or ""
         result_lower = result_text.lower()
@@ -1055,14 +988,6 @@ def renew_account(account):
                     print(f"  [RESULT] 到期日: {expiry_date}", flush=True)
                     break
 
-        try:
-            result_png = f"result_{phone}.png"
-            status = "成功" if is_success else "失败"
-            caption = f"{'✅' if is_success else '❌'} {status} - {phone}\n到期日: {expiry_date or '未知'}"
-            take_screenshot(page, result_png, bot_token, chat_id, caption)
-        except Exception as e:
-            print(f"  [截图] 结果截图失败: {e}", flush=True)
-
         if is_success:
             notify_success(phone, expiry_date or "未知日期", bot_token, chat_id)
             return True
@@ -1075,11 +1000,6 @@ def renew_account(account):
     except Exception as e:
         print(f"  ❌ 异常: {e}", flush=True)
         traceback.print_exc()
-        if page:
-            try:
-                take_screenshot(page, f"error_{phone}.png", bot_token, chat_id, f"⚠️ 异常 - {phone}\n{e}")
-            except:
-                pass
         notify_failed(phone, "执行异常", str(e), bot_token, chat_id)
         return False
     finally:
@@ -1092,7 +1012,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (最终修正版)", flush=True)
+    print("   HAX 自动续期 (最终稳定版)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
