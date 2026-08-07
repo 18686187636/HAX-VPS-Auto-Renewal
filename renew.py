@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (增强调试版 + 截图推送)
+HAX VPS Auto-Renewal (增强调试版 + 等待截图)
 - 每一步都打印状态，便于定位卡点
-- 关键步骤自动截图并通过 Telegram Bot 发送
-- 支持 ruyipage + Telegram OAuth（原始登录方式）
+- 等待续期码期间每分钟截图并发送
+- 支持 ruyipage + Telegram OAuth
 - 支持 Cookie 快速登录
-- 代理、验证码、续期码、通知
 """
 import os
 import sys
@@ -132,7 +131,6 @@ def take_screenshot(page, path, bot_token, chat_id, caption):
         elif hasattr(page, '_driver'):
             driver = page._driver
         else:
-            # 尝试直接调用 page.driver (有些版本)
             try:
                 driver = page.driver
             except:
@@ -141,7 +139,6 @@ def take_screenshot(page, path, bot_token, chat_id, caption):
         if driver and hasattr(driver, 'get_screenshot_as_file'):
             driver.get_screenshot_as_file(path)
         else:
-            # 尝试 ruyipage 自带方法（虽然已失败，但保留fallback）
             try:
                 page.get_screenshot(path)
             except:
@@ -589,8 +586,11 @@ def solve_arithmetic_captcha(page):
     print(f"  [CAPTCHA] 算式: {digits[0]} {op_symbol} {digits[1]} = {result}", flush=True)
     return result
 
-# ===================== 续期码获取 =====================
-def get_renewal_code_from_telegram(bot_tokens, timeout=1800, poll_interval=10):
+# ===================== 续期码获取（新增等待截图） =====================
+def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, timeout=1800, poll_interval=10):
+    """
+    轮询 Telegram 获取续期码，并每分钟截图发送
+    """
     debug_print(f"进入 get_renewal_code_from_telegram，超时 {timeout}s")
     offsets = {}
     for bt in bot_tokens:
@@ -607,7 +607,19 @@ def get_renewal_code_from_telegram(bot_tokens, timeout=1800, poll_interval=10):
             offsets[bt['token']] = 0
     elapsed = 0
     code = ""
+    last_screenshot_minute = -1
     while elapsed < timeout:
+        # 每分钟截图并发送
+        current_minute = elapsed // 60
+        if current_minute > last_screenshot_minute and current_minute > 0:
+            last_screenshot_minute = current_minute
+            try:
+                png_path = f"waiting_{phone}_{current_minute}m.png"
+                take_screenshot(page, png_path, bot_token, chat_id,
+                                f"⏳ 等待续期码 (已等待 {current_minute} 分钟) - {phone}")
+            except Exception as e:
+                print(f"  [截图] 等待截图失败: {e}", flush=True)
+
         for bt in bot_tokens:
             offset = offsets.get(bt['token'], 0)
             try:
@@ -637,7 +649,7 @@ def get_renewal_code_from_telegram(bot_tokens, timeout=1800, poll_interval=10):
             print(f"  [CODE] 等待中... ({elapsed//60} 分钟)", flush=True)
     return "", None
 
-# ===================== 单账号续期主流程（含截图推送） =====================
+# ===================== 单账号续期主流程 =====================
 def renew_account(account):
     phone = account.get("phone")
     session_token = account.get("session_token")
@@ -789,7 +801,7 @@ def renew_account(account):
         except Exception as e:
             print(f"  [截图] Renew VPS 截图失败: {e}", flush=True)
 
-        # ---------- 获取续期码 ----------
+        # ---------- 获取续期码（含等待截图） ----------
         debug_print("开始获取续期码")
         print("  [CODE] 等待 @HaxTG_bot 发送续期码...", flush=True)
         all_bots = []
@@ -802,7 +814,11 @@ def renew_account(account):
         if bot_token and bot_token not in seen:
             all_bots.insert(0, {"token": bot_token, "label": f"...{bot_token[-6:]}"})
 
-        code, source = get_renewal_code_from_telegram(all_bots, timeout=1800, poll_interval=10)
+        # 调用改进后的函数，传入 page, phone, bot_token, chat_id
+        code, source = get_renewal_code_from_telegram(
+            all_bots, page, phone, bot_token, chat_id,
+            timeout=1800, poll_interval=10
+        )
         if not code:
             # 超时未收到续期码，截图当前页面发送
             try:
@@ -961,7 +977,6 @@ def renew_account(account):
     except Exception as e:
         print(f"  ❌ 异常: {e}", flush=True)
         traceback.print_exc()
-        # 发生异常时也尝试截图
         if page:
             try:
                 error_png = f"error_{phone}.png"
@@ -981,7 +996,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (增强调试版 + 截图推送)", flush=True)
+    print("   HAX 自动续期 (增强调试版 + 等待截图)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
