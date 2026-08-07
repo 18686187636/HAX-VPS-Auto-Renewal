@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (最终修复版)
+HAX VPS Auto-Renewal (最终版 - Consent 提前处理)
 """
 import os
 import sys
@@ -34,7 +34,7 @@ PROXY_ADDR = os.getenv("PROXY_SERVER", "socks5://127.0.0.1:1080")
 CODE_FILE = "renewal_code.txt"
 TG_RENEWAL_PATTERN = re.compile(r'[A-Za-z0-9+/=]{32,}')
 DEBUG = os.getenv("DEBUG", "true").lower() == "true"
-SEND_SCREENSHOTS = os.getenv("SEND_SCREENSHOTS", "true").lower() == "true"   # ✅ 正确，无多余括号
+SEND_SCREENSHOTS = os.getenv("SEND_SCREENSHOTS", "true").lower() == "true"
 
 def debug_print(*args, **kwargs):
     if DEBUG:
@@ -699,7 +699,7 @@ def close_all_popups(page):
             except:
                 continue
 
-        # 通过 JS 尝试点击关闭按钮（避免重复声明）
+        # 通过 JS 尝试点击关闭按钮
         page.run_js("""
             (function() {
                 var btns = document.querySelectorAll('button, a, span, div');
@@ -815,6 +815,10 @@ def renew_account(account):
             if is_logged_in(page):
                 print("  ✅ Cookie 登录成功", flush=True)
                 login_success = True
+                # ---------- 🟢 立即处理 Consent 和弹窗 ----------
+                debug_print("检测并处理 Consent 弹窗（Cookie 登录后）")
+                handle_consent(page)
+                close_all_popups(page)
             else:
                 print("  ⚠️ Cookie 未生效，将执行 OAuth", flush=True)
                 try:
@@ -829,6 +833,10 @@ def renew_account(account):
             login_success = login_with_telegram_original(page, phone)
             if not login_success:
                 raise RuntimeError("Telegram 登录失败")
+            # ---------- 🟢 立即处理 Consent 和弹窗 ----------
+            debug_print("检测并处理 Consent 弹窗（OAuth 登录后）")
+            handle_consent(page)
+            close_all_popups(page)
 
         # 再次确认登录
         if not is_logged_in(page):
@@ -846,15 +854,9 @@ def renew_account(account):
         except Exception as e:
             print(f"  [截图] 登录截图失败: {e}", flush=True)
 
-        # ---------- 处理 Consent ----------
-        debug_print("检测并处理 Consent 弹窗")
-        handle_consent(page)
-
-        # ---------- 关闭弹窗 ----------
-        debug_print("关闭页面弹窗/广告")
-        close_all_popups(page)
-
-        # ---------- 处理广告 ----------
+        # ---------- 后续流程（广告、续期等） ----------
+        # 注意：Consent 已提前处理，这里不再重复，但可再调用一次以确保
+        # 但我们将后续广告处理保留，不再调用 handle_consent（避免干扰）
         debug_print("处理广告")
         print("  [AD] 等待并关闭广告...", flush=True)
         page.wait(3)
@@ -1106,7 +1108,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (最终修复版)", flush=True)
+    print("   HAX 自动续期 (最终版)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
