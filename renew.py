@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (最终稳定版)
+HAX VPS Auto-Renewal (完整版)
 - Cookie 快速登录（完整域和路径注入）
-- 若 Cookie 失效，自动回退 Telegram OAuth 登录（使用 tab_ids 和 get_tab）
+- 若 Cookie 失效，自动回退 Telegram OAuth 登录（增强输入框查找 + 截图）
 - 代理自动检测 + 出口 IP 验证
 - 算术验证码 + 音频 reCAPTCHA 识别
 - 多 Bot 轮询获取续期码
 - Telegram 通知
-- 兼容 DrissionPage 4.x
+- 兼容 DrissionPage 4.x，支持 GitHub Actions 无头运行
 """
 import os
 import sys
@@ -117,7 +117,7 @@ def find_frame_by_keyword(page, keyword):
         pass
     return None
 
-# ===================== Telegram OAuth 登录（使用 tab_ids 和 get_tab） =====================
+# ===================== Telegram OAuth 登录（增强版 + 截图） =====================
 def login_with_telegram(page, phone):
     print(f"  [LOGIN] 尝试 Telegram OAuth 登录: {phone}")
     try:
@@ -138,7 +138,7 @@ def login_with_telegram(page, phone):
 
         # 获取当前标签页 ID
         original_tab_id = page.tab_id
-        # 查找新标签页 ID
+        # 查找新标签页
         oauth_tab_id = None
         for tab_id in page.tab_ids:
             if tab_id == original_tab_id:
@@ -159,27 +159,103 @@ def login_with_telegram(page, phone):
         if not oauth_tab_id:
             raise RuntimeError("未找到 OAuth tab")
 
-        # 切换到新标签页（通过赋值 page.tab）
-        oauth_tab = page.get_tab(oauth_tab_id)
-        page.tab = oauth_tab
+        # 切换到新标签页
+        try:
+            page.to_tab(oauth_tab_id)
+        except:
+            oauth_tab = page.get_tab(oauth_tab_id)
+            page.tab = oauth_tab
         page.wait.doc_loaded(timeout=20)
+        time.sleep(5)   # 确保页面完全加载
+
+        # ---- 尝试多种方式定位手机号输入框 ----
+        phone_input = None
+        # 1) 直接查找
+        selectors = [
+            "css:#login-phone-code",
+            "css:input[name='phone']",
+            "css:input[type='tel']",
+            "css:input[placeholder*='Phone']",
+            "css:input[placeholder*='手机']",
+            "xpath://input[contains(@placeholder, 'Phone')]",
+            "xpath://input[contains(@placeholder, '手机')]",
+        ]
+        for sel in selectors:
+            try:
+                phone_input = page.ele(sel, timeout=2)
+                if phone_input and phone_input.is_displayed:
+                    break
+            except:
+                continue
+
+        # 2) 如果找不到，尝试点击“使用手机号登录”按钮
+        if not phone_input:
+            print("  [LOGIN] 未直接找到手机号输入框，尝试点击'使用手机号登录'...")
+            btn_selectors = [
+                "text:使用手机号登录",
+                "text:Login with phone",
+                "text:使用电话号码",
+                "xpath://*[contains(text(), '手机号')]",
+                "xpath://*[contains(text(), 'Phone')]",
+            ]
+            for sel in btn_selectors:
+                try:
+                    phone_btn = page.ele(sel, timeout=2)
+                    if phone_btn and phone_btn.is_displayed:
+                        phone_btn.click()
+                        time.sleep(2)
+                        # 再次查找输入框
+                        for sel2 in selectors:
+                            try:
+                                phone_input = page.ele(sel2, timeout=2)
+                                if phone_input and phone_input.is_displayed:
+                                    break
+                            except:
+                                continue
+                        if phone_input:
+                            break
+                except:
+                    continue
+
+        # 3) 如果仍然没有，尝试用 JS 获取页面中的第一个可见 input
+        if not phone_input:
+            print("  [LOGIN] 警告：无法定位手机号输入框，尝试使用 JS 查找...")
+            input_count = page.run_js("return document.querySelectorAll('input').length;")
+            print(f"  [LOGIN] 页面中共 {input_count} 个 input 元素")
+            if input_count > 0:
+                first_input = page.ele("css:input", timeout=1)
+                if first_input and first_input.is_displayed:
+                    phone_input = first_input
+                    print("  [LOGIN] 使用第一个可见的 input 作为手机号输入框")
+
+        if not phone_input:
+            # 保存截图以便调试
+            try:
+                page.get_screenshot(path=f"oauth_error_{phone}.png")
+                print(f"  [LOGIN] 页面截图已保存为 oauth_error_{phone}.png")
+            except:
+                pass
+            raise RuntimeError("未找到手机号输入框，请检查 Telegram OAuth 页面结构")
 
         # 输入手机号
-        phone_input = page.ele("css:#login-phone-code", timeout=5)
-        if not phone_input:
-            raise RuntimeError("未找到手机号输入框")
         phone_input.input(phone, clear=True)
         print(f"  [LOGIN] 输入手机号: {phone}")
         time.sleep(2)
 
         # 点击继续
-        continue_btn = page.ele("text:继续") or page.ele("css:button[type=submit]") or page.ele("css:button")
+        continue_btn = page.ele("text:继续") or page.ele("text:Next") or page.ele("css:button[type=submit]") or page.ele("css:button")
         if continue_btn:
             continue_btn.click()
             print("  [LOGIN] 点击继续")
+        else:
+            page.run_js("document.querySelector('form')?.submit();")
+            print("  [LOGIN] 使用 JS 提交表单")
 
         # 切回主标签页
-        page.tab = page.get_tab(original_tab_id)
+        try:
+            page.to_tab(original_tab_id)
+        except:
+            page.tab = page.get_tab(original_tab_id)
 
         # 等待主标签页跳转回 vps-info
         for _ in range(60):
@@ -193,54 +269,7 @@ def login_with_telegram(page, phone):
         print(f"  [LOGIN] 失败: {e}")
         return False
 
-# ===================== 续期码获取（多 Bot 轮询） =====================
-def get_renewal_code_from_telegram(bot_tokens, timeout=1800, poll_interval=10):
-    offsets = {}
-    for bt in bot_tokens:
-        try:
-            proxies = get_proxies()
-            url = f"https://api.telegram.org/bot{bt['token']}/getUpdates"
-            resp = requests.get(url, timeout=10, proxies=proxies) if proxies else requests.get(url, timeout=10)
-            data = resp.json()
-            if data.get("ok") and data.get("result"):
-                offsets[bt['token']] = max(u["update_id"] for u in data["result"]) + 1
-            else:
-                offsets[bt['token']] = 0
-        except Exception:
-            offsets[bt['token']] = 0
-    elapsed = 0
-    code = ""
-    while elapsed < timeout:
-        for bt in bot_tokens:
-            offset = offsets.get(bt['token'], 0)
-            try:
-                proxies = get_proxies()
-                url = f"https://api.telegram.org/bot{bt['token']}/getUpdates?offset={offset}&timeout=5"
-                resp = (requests.get(url, timeout=10, proxies=proxies) if proxies else requests.get(url, timeout=10))
-                data = resp.json()
-                if data.get("ok"):
-                    for update in data.get("result", []):
-                        offsets[bt['token']] = update["update_id"] + 1
-                        msg = update.get("message", {})
-                        text = msg.get("text", "") or msg.get("caption", "")
-                        if text:
-                            match = TG_RENEWAL_PATTERN.search(text)
-                            if match:
-                                code = match.group(0)
-                                with open(CODE_FILE, "w") as f:
-                                    f.write(code)
-                                return code, bt.get("label", bt['token'][-6:])
-            except Exception:
-                pass
-        if code:
-            break
-        time.sleep(poll_interval)
-        elapsed += poll_interval
-        if elapsed % 60 < poll_interval:
-            print(f"  [CODE] 等待中... ({elapsed//60} 分钟)")
-    return "", None
-
-# ===================== reCAPTCHA 音频求解 =====================
+# ===================== reCAPTCHA 音频求解（完整） =====================
 def find_frame(page, keyword):
     try:
         for frame in page.get_frames():
@@ -444,7 +473,7 @@ def solve_recaptcha(page, timeout=90):
             print("  [reCAPTCHA] 验证未通过，重试...")
     return False
 
-# ===================== 算术验证码 =====================
+# ===================== 算术验证码（完整） =====================
 def solve_arithmetic_captcha(page):
     print("  [CAPTCHA] 识别算术验证码...")
     page.wait(3)
@@ -538,6 +567,53 @@ def set_session_cookie(page, session_token):
     print("  [COOKIE] 所有方式均失败")
     return False
 
+# ===================== 续期码获取（多 Bot 轮询） =====================
+def get_renewal_code_from_telegram(bot_tokens, timeout=1800, poll_interval=10):
+    offsets = {}
+    for bt in bot_tokens:
+        try:
+            proxies = get_proxies()
+            url = f"https://api.telegram.org/bot{bt['token']}/getUpdates"
+            resp = requests.get(url, timeout=10, proxies=proxies) if proxies else requests.get(url, timeout=10)
+            data = resp.json()
+            if data.get("ok") and data.get("result"):
+                offsets[bt['token']] = max(u["update_id"] for u in data["result"]) + 1
+            else:
+                offsets[bt['token']] = 0
+        except Exception:
+            offsets[bt['token']] = 0
+    elapsed = 0
+    code = ""
+    while elapsed < timeout:
+        for bt in bot_tokens:
+            offset = offsets.get(bt['token'], 0)
+            try:
+                proxies = get_proxies()
+                url = f"https://api.telegram.org/bot{bt['token']}/getUpdates?offset={offset}&timeout=5"
+                resp = (requests.get(url, timeout=10, proxies=proxies) if proxies else requests.get(url, timeout=10))
+                data = resp.json()
+                if data.get("ok"):
+                    for update in data.get("result", []):
+                        offsets[bt['token']] = update["update_id"] + 1
+                        msg = update.get("message", {})
+                        text = msg.get("text", "") or msg.get("caption", "")
+                        if text:
+                            match = TG_RENEWAL_PATTERN.search(text)
+                            if match:
+                                code = match.group(0)
+                                with open(CODE_FILE, "w") as f:
+                                    f.write(code)
+                                return code, bt.get("label", bt['token'][-6:])
+            except Exception:
+                pass
+        if code:
+            break
+        time.sleep(poll_interval)
+        elapsed += poll_interval
+        if elapsed % 60 < poll_interval:
+            print(f"  [CODE] 等待中... ({elapsed//60} 分钟)")
+    return "", None
+
 # ===================== 单账号续期主流程 =====================
 def renew_account(account):
     phone = account.get("phone")
@@ -583,7 +659,6 @@ def renew_account(account):
             print("  [LOGIN] 尝试使用 session_token 快速登录...")
             page.get("https://hax.co.id/login")
             set_session_cookie(page, session_token)
-            # 验证 Cookie 是否真的注入成功
             cookie_check = page.run_js("return document.cookie.includes('PHPSESSID');")
             if cookie_check:
                 print("  [COOKIE] 验证：Cookie 已存在于浏览器")
@@ -601,13 +676,18 @@ def renew_account(account):
             print("  [LOGIN] 执行 Telegram OAuth 登录...")
             login_success = login_with_telegram(page, phone)
             if not login_success:
+                # 保存当前页面截图
+                try:
+                    page.get_screenshot(path=f"login_fail_{phone}.png")
+                    print(f"  [DEBUG] 登录失败截图保存为 login_fail_{phone}.png")
+                except:
+                    pass
                 raise RuntimeError("Telegram 登录失败")
 
         print("  ✅ 登录成功，开始续期流程")
 
-        # ---------- 处理广告 ----------
+        # ---------- 处理广告（使用 JS 模拟 ESC） ----------
         time.sleep(3)
-        # 使用 JS 模拟 ESC 键（避免 Actions.press 不存在）
         page.run_js("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'}));")
         time.sleep(1)
         for kw in ["Close", "close", "×"]:
