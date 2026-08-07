@@ -34,7 +34,7 @@ HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
 PROXY_ADDR = os.getenv("PROXY_SERVER", "socks5://127.0.0.1:1080")
 CODE_FILE = "renewal_code.txt"
 TG_RENEWAL_PATTERN = re.compile(r'[A-Za-z0-9+/=]{32,}')
-DEBUG = os.getenv("DEBUG", "true").lower() == "true")
+DEBUG = os.getenv("DEBUG", "true").lower() == "true"
 SEND_SCREENSHOTS = os.getenv("SEND_SCREENSHOTS", "true").lower() == "true"
 
 def debug_print(*args, **kwargs):
