@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Userbot 转发器（增强版：日志 + 重试）
+Userbot 转发器
+环境变量：
+  API_ID          - my.telegram.org 获取的应用 ID
+  API_HASH        - 应用 Hash
+  SESSION_STRING  - 本地生成的会话字符串（对应个人账号）
+  TARGET_BOT_TOKEN - 目标 Bot Token（续期脚本轮询的 Bot）
+  TARGET_CHAT_ID   - 接收通知的 Chat ID（个人或群组）
 """
 import os
 import asyncio
@@ -29,33 +35,32 @@ if len(SESSION_STRING) < 50:
 CODE_PATTERN = re.compile(r'[A-Za-z0-9+/=]{32,}')
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
-def forward_with_retry(text, max_retries=3):
-    """转发消息到目标 Bot，失败时重试"""
+def forward_to_bot(text, max_retries=3):
     url = f'https://api.telegram.org/bot{TARGET_BOT_TOKEN}/sendMessage'
     data = {'chat_id': TARGET_CHAT_ID, 'text': text}
     for attempt in range(max_retries):
         try:
             resp = requests.post(url, json=data, timeout=15)
             if resp.status_code == 200 and resp.json().get('ok'):
-                print('[Forwarder] ✅ 续期码已转发到目标 Bot')
+                print('[Forwarder] ✅ 续期码已发送到目标 Bot')
                 return True
             else:
-                print(f'[Forwarder] ⚠️ 转发尝试 {attempt+1} 失败: {resp.text}')
+                print(f'[Forwarder] ⚠️ 发送尝试 {attempt+1} 失败: {resp.text}')
         except Exception as e:
-            print(f'[Forwarder] ⚠️ 转发尝试 {attempt+1} 异常: {e}')
+            print(f'[Forwarder] ⚠️ 发送尝试 {attempt+1} 异常: {e}')
         time.sleep(2)
-    print('[Forwarder] ❌ 转发失败（已达到最大重试次数）')
+    print('[Forwarder] ❌ 发送失败（已达到最大重试次数）')
     return False
 
 @client.on(events.NewMessage(from_users='@HaxTG_bot'))
 async def handler(event):
     text = event.raw_text or ''
-    print(f'[Forwarder] 收到消息: {text[:80]}...')
+    print(f'[Forwarder] 收到来自 @HaxTG_bot 的消息: {text[:80]}...')
     match = CODE_PATTERN.search(text)
     if match:
         code = match.group(0)
         print(f'[Forwarder] ✅ 捕获到续期码: {code[:20]}...')
-        forward_with_retry(code)
+        forward_to_bot(code)
     else:
         print('[Forwarder] ⚠️ 消息中未找到续期码（可能是其他消息）')
 
