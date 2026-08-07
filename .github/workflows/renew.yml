@@ -27,7 +27,7 @@ jobs:
           pip install ruyiPage --upgrade
           python -m ruyipage install
 
-      - name: Verify ruyipage installation
+      - name: Verify ruyipage
         run: python -c "import ruyipage; print(ruyipage.__version__)"
 
       - name: Configure sing-box proxy
@@ -164,30 +164,45 @@ jobs:
         if: always()
         run: cat sing-box.log || true
 
-      - name: Start forwarder and run renewal
+      - name: Start forwarders and run renewal
         env:
-          # Userbot 转发器配置
+          # 共用的 API 凭据（若三个账号使用同一应用，可共用；否则分别配置）
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
-          SESSION_STRING: ${{ secrets.SESSION_STRING }}
-          TARGET_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          TARGET_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           # 续期脚本配置
           ACCOUNTS_JSON: ${{ secrets.ACCOUNTS_JSON }}
           HEADLESS: "true"
           PROXY_SERVER: ${{ secrets.NODE_LINK != '' && 'http://127.0.0.1:1081' || '' }}
         run: |
-          # 后台启动转发器
+          # 启动账号1的转发器
+          SESSION_STRING=${{ secrets.SESSION_STRING_1 }} \
+          TARGET_BOT_TOKEN=${{ secrets.BOT_TOKEN_1 }} \
+          TARGET_CHAT_ID=${{ secrets.CHAT_ID_1 }} \
           python3 forwarder.py &
-          FORWARDER_PID=$!
-          echo "🚀 转发器已启动 (PID=$FORWARDER_PID)"
-          sleep 8
+          PID1=$!
+
+          # 启动账号2的转发器
+          SESSION_STRING=${{ secrets.SESSION_STRING_2 }} \
+          TARGET_BOT_TOKEN=${{ secrets.BOT_TOKEN_2 }} \
+          TARGET_CHAT_ID=${{ secrets.CHAT_ID_2 }} \
+          python3 forwarder.py &
+          PID2=$!
+
+          # 启动账号3的转发器
+          SESSION_STRING=${{ secrets.SESSION_STRING_3 }} \
+          TARGET_BOT_TOKEN=${{ secrets.BOT_TOKEN_3 }} \
+          TARGET_CHAT_ID=${{ secrets.CHAT_ID_3 }} \
+          python3 forwarder.py &
+          PID3=$!
+
+          echo "🚀 三个转发器已启动 (PIDs: $PID1, $PID2, $PID3)"
+          sleep 8  # 等待转发器初始化
 
           # 运行续期脚本
           xvfb-run --auto-servernum python3 renew.py
 
           # 清理
-          kill $FORWARDER_PID 2>/dev/null || true
+          kill $PID1 $PID2 $PID3 2>/dev/null || true
 
       - name: Upload screenshots
         if: always()
