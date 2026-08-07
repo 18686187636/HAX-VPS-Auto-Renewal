@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (10秒后提取最新消息 + 滚动修复 + 全部更新)
+HAX VPS Auto-Renewal (10秒后提取最新消息 - 强制 offset=0)
 """
 import os
 import sys
@@ -611,13 +611,13 @@ def solve_arithmetic_captcha(page):
     print(f"  [CAPTCHA] 算式: {digits[0]} {op_symbol} {digits[1]} = {result}", flush=True)
     return result
 
-# ===================== 获取最新消息（不加 limit，取最后一条） =====================
+# ===================== 获取最新消息（强制 offset=0） =====================
 def get_latest_message(bot_token):
     """获取目标 Bot 的最新一条消息，若包含续期码则返回，否则返回 None"""
     try:
         proxies = get_proxies()
-        # 不加 limit，获取所有更新，取最后一条（最新）
-        url = f"https://api.telegram.org/bot{bot_token}/getUpdates"
+        # 使用 offset=0 强制获取所有消息，取最后一条
+        url = f"https://api.telegram.org/bot{bot_token}/getUpdates?offset=0"
         resp = req_lib.get(url, timeout=15, proxies=proxies) if proxies else req_lib.get(url, timeout=15)
         data = resp.json()
         if data.get("ok"):
@@ -987,7 +987,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (10秒后提取最新消息 - 无limit)", flush=True)
+    print("   HAX 自动续期 (10秒后提取最新消息 - offset=0)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
