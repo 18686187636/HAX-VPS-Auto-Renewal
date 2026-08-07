@@ -1,14 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (整合本地广告处理逻辑)
-- 多账号支持 (ACCOUNTS_JSON)
-- Cookie 快速登录 + Telegram OAuth 回退
-- 本地脚本式广告关闭 (等待3秒 → ESC → 关键词点击)
-- Consent 弹窗处理
-- 算术验证码 + 音频 reCAPTCHA
-- 续期码多 Bot 轮询
-- Telegram 通知 + 截图
+HAX VPS Auto-Renewal (增强弹窗清理版)
 """
 import os
 import sys
@@ -41,7 +34,7 @@ PROXY_ADDR = os.getenv("PROXY_SERVER", "socks5://127.0.0.1:1080")
 CODE_FILE = "renewal_code.txt"
 TG_RENEWAL_PATTERN = re.compile(r'[A-Za-z0-9+/=]{32,}')
 DEBUG = os.getenv("DEBUG", "true").lower() == "true"
-SEND_SCREENSHOTS = os.getenv("SEND_SCREENSHOTS", "true").lower() == "true"
+SEND_SCREENSHOTS = os.getenv("SEND_SCREENSHOTS", "true").lower() == "true")
 
 def debug_print(*args, **kwargs):
     if DEBUG:
@@ -186,7 +179,7 @@ def is_logged_in(page):
     except:
         return False
 
-# ===================== Telegram OAuth 登录（本地脚本方式） =====================
+# ===================== Telegram OAuth 登录 =====================
 def login_with_telegram_original(page, phone):
     debug_print("进入 login_with_telegram_original")
     print(f"  [LOGIN] 尝试 Telegram OAuth 登录: {phone}", flush=True)
@@ -269,7 +262,7 @@ def set_session_cookie(page, session_token):
         debug_print(f"JS 注入失败: {e}")
     return False
 
-# ===================== reCAPTCHA 音频求解（从本地脚本移植） =====================
+# ===================== reCAPTCHA 音频求解（完整） =====================
 def find_frame(page, keyword):
     try:
         frames = page.get_frames()
@@ -618,7 +611,7 @@ def solve_arithmetic_captcha(page):
     print(f"  [CAPTCHA] 算式: {digits[0]} {op_symbol} {digits[1]} = {result}", flush=True)
     return result
 
-# ===================== 续期码获取（多 Bot 轮询） =====================
+# ===================== 续期码获取（含等待截图） =====================
 def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, timeout=1800, poll_interval=10):
     debug_print(f"进入 get_renewal_code_from_telegram，超时 {timeout}s")
     offsets = {}
@@ -676,9 +669,10 @@ def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, 
             print(f"  [CODE] 等待中... ({elapsed//60} 分钟)", flush=True)
     return "", None
 
-# ===================== 广告关闭（本地脚本逻辑） =====================
+# ===================== 增强版广告关闭（含 JS 移除） =====================
 def close_ads(page):
-    """按照本地脚本方式关闭广告弹窗"""
+    """按照本地脚本方式关闭广告，并额外用 JS 移除遮挡元素"""
+    # 本地脚本方式（等待、ESC、关键词点击）
     print("  [AD] 等待并关闭广告...")
     page.wait(3)
     try:
@@ -696,6 +690,34 @@ def close_ads(page):
         except Exception:
             pass
     page.wait(3)
+    
+    # 额外通过 JS 移除常见弹窗元素
+    js_remove = """
+    (function() {
+        // 移除常见弹窗 overlay
+        var selectors = [
+            '.overlay', '.modal-backdrop', '.popup-overlay', 
+            '[class*="overlay"]', '[class*="modal"]', '[class*="popup"]',
+            '.ad-container', '.ad-wrapper', '.banner-ad'
+        ];
+        selectors.forEach(function(sel) {
+            document.querySelectorAll(sel).forEach(function(el) { el.remove(); });
+        });
+        // 移除固定定位且 z-index 很高的元素
+        var all = document.querySelectorAll('*');
+        all.forEach(function(el) {
+            var style = getComputedStyle(el);
+            if (style.position === 'fixed' && parseInt(style.zIndex) > 999) {
+                el.remove();
+            }
+        });
+    })();
+    """
+    try:
+        page.run_js(js_remove)
+        time.sleep(1)
+    except Exception as e:
+        debug_print(f"JS移除弹窗失败: {e}")
 
 # ===================== 处理 Consent 弹窗 =====================
 def handle_consent(page):
@@ -800,9 +822,9 @@ def renew_account(account):
 
         print("  ✅ 登录成功，开始续期流程", flush=True)
 
-        # ----- 1. 处理 Consent 和广告（本地脚本方式） -----
+        # ----- 1. 处理 Consent 和广告 -----
         handle_consent(page)
-        close_ads(page)   # 登录后的首次广告关闭
+        close_ads(page)
 
         # 登录成功截图
         try:
@@ -854,7 +876,7 @@ def renew_account(account):
         print("  [FORM] 点击 Renew VPS", flush=True)
         page.wait(5)
 
-        # ----- 2. 点击 Renew VPS 后可能弹出广告 -----
+        # ----- 2. 点击 Renew VPS 后关闭广告 -----
         close_ads(page)
 
         try:
@@ -915,7 +937,7 @@ def renew_account(account):
         page.wait.doc_loaded(timeout=15)
         page.wait(3)
 
-        # ----- 3. 进入续期码页后可能弹出广告 -----
+        # ----- 3. 进入续期码页后关闭广告 -----
         close_ads(page)
 
         # ---------- 算术验证码 ----------
@@ -960,7 +982,6 @@ def renew_account(account):
         # ---------- 提交 ----------
         debug_print("提交续期")
         print("  [SUBMIT] 提交续期...", flush=True)
-        # ----- 4. 提交前可能弹窗 -----
         close_ads(page)
         submit_btn = None
         for selector in [
@@ -988,12 +1009,22 @@ def renew_account(account):
         print("  [SUBMIT] 已点击提交，等待结果...", flush=True)
         time.sleep(60)
 
-        # ---------- 检查结果 ----------
+        # ---------- 检查结果（增强弹窗清理） ----------
         debug_print("检查续期结果")
-        # 再次关闭可能的广告
-        close_ads(page)
+        # 多次关闭广告，确保弹窗被清除
+        for _ in range(3):
+            close_ads(page)
+            time.sleep(1)
+        # 额外使用 JS 移除所有可能的遮挡
+        page.run_js("""
+            document.querySelectorAll('.overlay, .modal, .popup, [class*="overlay"], [class*="modal"], [class*="popup"]')
+                .forEach(el => el.remove());
+        """)
+        time.sleep(2)
         page.wait.doc_loaded(timeout=15)
         page.wait(3)
+        # 再次关闭一次
+        close_ads(page)
         result_text = page.run_js("document.body.innerText") or ""
         result_lower = result_text.lower()
         is_success = False
@@ -1058,7 +1089,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (本地广告逻辑版)", flush=True)
+    print("   HAX 自动续期 (增强弹窗清理版)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
