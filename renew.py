@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (增强调试版 + 等待截图修复)
+HAX VPS Auto-Renewal (最终修复版 - 增强登录检测 + OAuth 稳定性)
+- 更可靠的登录状态判断（检查页面元素）
+- OAuth 登录增加重试和等待
 - 每一步都打印状态，便于定位卡点
 - 等待续期码期间每分钟截图并发送
 - 支持 ruyipage + Telegram OAuth
@@ -191,16 +193,24 @@ def notify_failed(phone, step, error, bot_token, chat_id):
     msg = f"❌ <b>VPS 续期失败</b>\n\nHAX\n📱 {phone}\n📍 {step}\n⚠️ {error}\n⏰ {get_beijing_time()}"
     send_telegram_message(msg, bot_token, chat_id)
 
-# ===================== Telegram OAuth 登录（原始方式） =====================
+# ===================== Telegram OAuth 登录（原始方式，增强稳定性） =====================
 def login_with_telegram_original(page, phone):
     debug_print("进入 login_with_telegram_original")
     print(f"  [LOGIN] 尝试 Telegram OAuth 登录: {phone}", flush=True)
     try:
         debug_print("准备切换至 OAuth iframe")
+        # 等待 iframe 出现
         iframe_xpath = "xpath://iframe[contains(@src, 'oauth.telegram.org')]"
+        for _ in range(10):
+            if page.ele(iframe_xpath, timeout=2):
+                break
+            time.sleep(1)
+        else:
+            raise RuntimeError("未找到 Telegram OAuth iframe")
+
         with page.with_frame(iframe_xpath) as frame_page:
             debug_print("已在 iframe 内")
-            btn = frame_page.ele("css:button.tgme_widget_login_button")
+            btn = frame_page.ele("css:button.tgme_widget_login_button", timeout=5)
             if not btn:
                 raise RuntimeError("未找到 Telegram 登录按钮")
             debug_print("找到登录按钮，准备点击")
@@ -211,23 +221,32 @@ def login_with_telegram_original(page, phone):
             debug_print("查找 OAuth 标签页")
             tab_ids = page.tab_ids
             oauth_tab_id = None
-            for tab_id in tab_ids:
-                tab = page.get_tab(tab_id)
-                if "oauth.telegram.org" in (tab.url or ""):
-                    oauth_tab_id = tab_id
+            for _ in range(10):
+                for tab_id in tab_ids:
+                    tab = page.get_tab(tab_id)
+                    if "oauth.telegram.org" in (tab.url or ""):
+                        oauth_tab_id = tab_id
+                        break
+                if oauth_tab_id:
                     break
-
+                time.sleep(1)
             if not oauth_tab_id:
                 raise RuntimeError("未找到 OAuth tab")
 
             debug_print(f"OAuth tab ID: {oauth_tab_id}")
             oauth_page = page.get_tab(oauth_tab_id)
             oauth_page.activate()
-            oauth_page.wait.doc_loaded(timeout=20)
+            oauth_page.wait.doc_loaded(timeout=30)
             print(f"  [LOGIN] OAuth URL: {oauth_page.url}", flush=True)
 
+            # 等待手机号输入框出现
             debug_print("查找手机号输入框")
-            phone_input = oauth_page.ele("css:#login-phone-code")
+            phone_input = None
+            for _ in range(10):
+                phone_input = oauth_page.ele("css:#login-phone-code", timeout=2)
+                if phone_input:
+                    break
+                time.sleep(1)
             if not phone_input:
                 raise RuntimeError("未找到手机号输入框")
             phone_input.input(phone, clear=True)
@@ -235,14 +254,23 @@ def login_with_telegram_original(page, phone):
             page.wait(2)
 
             debug_print("查找继续按钮")
-            continue_btn = oauth_page.ele("text:继续") or oauth_page.ele("css:button[type=submit]") or oauth_page.ele("css:button")
+            continue_btn = oauth_page.ele("text:继续") or oauth_page.ele("text:Next") or oauth_page.ele("css:button[type=submit]") or oauth_page.ele("css:button")
             if continue_btn:
                 continue_btn.click_self()
                 print("  [LOGIN] 点击继续", flush=True)
+            else:
+                # 尝试 JS 提交
+                oauth_page.run_js("document.querySelector('form')?.submit();")
+                print("  [LOGIN] 使用 JS 提交", flush=True)
 
             debug_print("等待跳转回 vps-info")
+            # 切回主标签页
+            try:
+                page.to_tab(page.tab_id)
+            except:
+                pass
             for _ in range(60):
-                page.wait(2)
+                time.sleep(2)
                 if "hax.co.id/vps-info" in (page.url or ""):
                     print("  [LOGIN] 已跳转到 VPS 信息页", flush=True)
                     return True
@@ -269,6 +297,21 @@ def set_session_cookie(page, session_token):
     except Exception as e:
         debug_print(f"JS 注入失败: {e}")
     return False
+
+# ===================== 检查是否真正登录 =====================
+def is_logged_in(page):
+    """检查页面是否处于登录状态（通过 VPS 菜单元素）"""
+    try:
+        # 检查是否存在 VPS 下拉菜单
+        menu = page.ele("css:a.nav-link.dropdown-toggle", timeout=3)
+        if menu and menu.is_displayed:
+            return True
+        # 检查页面标题
+        if "VPS Info" in page.title:
+            return True
+        return False
+    except:
+        return False
 
 # ===================== reCAPTCHA 音频求解 =====================
 def find_frame(page, keyword):
@@ -619,7 +662,7 @@ def solve_arithmetic_captcha(page):
     print(f"  [CAPTCHA] 算式: {digits[0]} {op_symbol} {digits[1]} = {result}", flush=True)
     return result
 
-# ===================== 续期码获取（含等待截图，修复版） =====================
+# ===================== 续期码获取（含等待截图） =====================
 def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, timeout=1800, poll_interval=10):
     """
     轮询 Telegram 获取续期码，并每分钟截图发送
@@ -743,18 +786,29 @@ def renew_account(account):
             debug_print("Cookie 设置完成，跳转 vps-info")
             page.get("https://hax.co.id/vps-info")
             page.wait.doc_loaded(timeout=15)
-            if "login" not in page.url.lower():
+            # 增强登录检测：检查页面元素
+            if is_logged_in(page):
                 print("  ✅ Cookie 登录成功", flush=True)
                 login_success = True
             else:
-                print("  ⚠️ Cookie 无效或已过期", flush=True)
+                print("  ⚠️ Cookie 未生效（可能被拦截或过期）", flush=True)
 
         if not login_success:
-            debug_print("Cookie 登录失败，执行 OAuth")
+            debug_print("Cookie 登录失败或未生效，执行 OAuth")
             print("  [LOGIN] 执行 Telegram OAuth 登录...", flush=True)
             login_success = login_with_telegram_original(page, phone)
             if not login_success:
                 raise RuntimeError("Telegram 登录失败")
+
+        # 再次确认登录状态
+        if not is_logged_in(page):
+            print("  ⚠️ 登录后仍未检测到 VPS 菜单，尝试重新加载页面...", flush=True)
+            page.get("https://hax.co.id/vps-info")
+            page.wait.doc_loaded(timeout=15)
+            if is_logged_in(page):
+                print("  ✅ 重新加载后确认登录", flush=True)
+            else:
+                raise RuntimeError("无法确认登录状态")
 
         print("  ✅ 登录成功，开始续期流程", flush=True)
 
@@ -836,7 +890,7 @@ def renew_account(account):
         except Exception as e:
             print(f"  [截图] Renew VPS 截图失败: {e}", flush=True)
 
-        # ---------- 获取续期码（含等待截图） ----------
+        # ---------- 获取续期码 ----------
         debug_print("开始获取续期码")
         print("  [CODE] 等待 @HaxTG_bot 发送续期码...", flush=True)
         all_bots = []
@@ -1031,7 +1085,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (增强调试版 + 等待截图)", flush=True)
+    print("   HAX 自动续期 (最终修复版)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
