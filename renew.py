@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (提前轮询 + 就绪等待)
+HAX VPS Auto-Renewal (提前轮询 + 缩短间隔 + 立即拉取)
 """
 import os
 import sys
@@ -612,8 +612,9 @@ def solve_arithmetic_captcha(page):
     print(f"  [CAPTCHA] 算式: {digits[0]} {op_symbol} {digits[1]} = {result}", flush=True)
     return result
 
-# ===================== 续期码轮询（独立线程，不操作页面） =====================
-def poll_code(bot_tokens, timeout, poll_interval, ready_event=None):
+# ===================== 续期码轮询函数 =====================
+def poll_code(bot_tokens, timeout, poll_interval):
+    """轮询 Bot 获取续期码，返回码字符串或 None"""
     if not bot_tokens:
         return None
     debug_print(f"轮询线程启动，超时 {timeout}s，监听 {len(bot_tokens)} 个 Bot")
@@ -630,9 +631,6 @@ def poll_code(bot_tokens, timeout, poll_interval, ready_event=None):
                 offsets[bt['token']] = 0
         except Exception:
             offsets[bt['token']] = 0
-    # 第一次连接完成，通知主线程已就绪
-    if ready_event:
-        ready_event.set()
     elapsed = 0
     while elapsed < timeout:
         for bt in bot_tokens:
@@ -643,19 +641,23 @@ def poll_code(bot_tokens, timeout, poll_interval, ready_event=None):
                 resp = (req_lib.get(url, timeout=10, proxies=proxies) if proxies else req_lib.get(url, timeout=10))
                 data = resp.json()
                 if data.get("ok"):
-                    for update in data.get("result", []):
+                    updates = data.get("result", [])
+                    if updates:
+                        print(f"  [轮询] 收到 {len(updates)} 条更新", flush=True)
+                    for update in updates:
                         offsets[bt['token']] = update["update_id"] + 1
                         msg = update.get("message", {})
                         text = msg.get("text", "") or msg.get("caption", "")
                         if text:
+                            print(f"  [轮询] 消息内容: {text[:50]}...", flush=True)
                             match = TG_RENEWAL_PATTERN.search(text)
                             if match:
                                 code = match.group(0)
                                 with open(CODE_FILE, "w") as f:
                                     f.write(code)
                                 return code
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"  [轮询] 请求异常: {e}", flush=True)
         time.sleep(poll_interval)
         elapsed += poll_interval
         if elapsed % 60 < poll_interval:
@@ -818,7 +820,7 @@ def renew_account(account):
         print("  [CF] 等待 CloudFlare 验证 (60s)...", flush=True)
         page.wait(60)
 
-        # ---------- 准备轮询续期码（后台线程） ----------
+        # ---------- 准备轮询（提前启动） ----------
         current_bot = [{"token": bot_token, "label": f"...{bot_token[-6:]}"}] if bot_token else []
         if not current_bot:
             raise RuntimeError("当前账号未配置 bot_token")
@@ -826,27 +828,19 @@ def renew_account(account):
         code = None
         poll_thread = None
         poll_timeout = 1800  # 30 分钟
-        poll_interval = 10
-        ready_event = threading.Event()
+        poll_interval = 3    # 缩短到 3 秒
 
-        # 启动轮询线程（在点击前就开始）
+        # 启动轮询线程
         debug_print("启动后台轮询线程...")
         def poll_target():
             nonlocal code
-            code = poll_code(current_bot, poll_timeout, poll_interval, ready_event)
+            code = poll_code(current_bot, poll_timeout, poll_interval)
 
         poll_thread = threading.Thread(target=poll_target, daemon=True)
         poll_thread.start()
-        
-        # 等待轮询线程就绪（已建立连接，开始监听）
-        debug_print("等待轮询线程就绪...")
-        ready_event.wait(timeout=30)  # 最多等待30秒
-        if not ready_event.is_set():
-            debug_print("轮询线程未能在30秒内就绪，继续执行...")
-        else:
-            debug_print("轮询线程已就绪，可以点击按钮")
+        debug_print("轮询线程已启动，继续执行点击...")
 
-        # 现在才打印等待消息并点击
+        # 在点击前打印等待消息
         print("  [CODE] 等待 @HaxTG_bot 发送续期码...", flush=True)
 
         # ---------- 点击 Renew VPS ----------
@@ -856,6 +850,13 @@ def renew_account(account):
         renew_vps_btn.click_self(by_js=True)
         print("  [FORM] 点击 Renew VPS", flush=True)
         page.wait(5)
+
+        # ---------- 立即强制拉取一次 ----------
+        print("  [CODE] 立即检查一次...", flush=True)
+        immediate_code = poll_code(current_bot, timeout=2, poll_interval=0)  # 只拉取一次
+        if immediate_code:
+            code = immediate_code
+            print(f"  [CODE] 立即拉取到续期码: {code[:20]}***", flush=True)
 
         # ---------- 等待轮询结果（主线程等待，同时截图） ----------
         start_wait = time.time()
@@ -871,7 +872,7 @@ def renew_account(account):
                                     f"⏳ 等待续期码 (已等待 {current_minute} 分钟) - {phone}")
                 except Exception as e:
                     print(f"  [截图] 等待截图失败: {e}", flush=True)
-            time.sleep(1)
+            time.sleep(0.5)
 
         if code is None:
             try:
@@ -1030,7 +1031,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (提前轮询 + 就绪等待)", flush=True)
+    print("   HAX 自动续期 (提前轮询 + 缩短间隔)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
