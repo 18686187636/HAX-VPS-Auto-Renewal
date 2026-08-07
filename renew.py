@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (增强调试版 + 等待截图)
+HAX VPS Auto-Renewal (增强调试版 + 等待截图修复)
 - 每一步都打印状态，便于定位卡点
 - 等待续期码期间每分钟截图并发送
 - 支持 ruyipage + Telegram OAuth
@@ -121,34 +121,67 @@ def send_telegram_photo(photo_path, caption, bot_token, chat_id):
         print(f"  [TG] 发送图片失败: {e}", flush=True)
         return False
 
+# ===================== 截图函数（修复版，含详细日志） =====================
 def take_screenshot(page, path, bot_token, chat_id, caption):
-    """截图并发送到 Telegram（兼容 ruyipage）"""
+    """截图并发送到 Telegram（兼容 ruyipage，带有详细日志）"""
     try:
-        # 尝试获取原生 WebDriver
+        debug_print(f"尝试截图: {path}")
         driver = None
-        if hasattr(page, 'page'):
-            driver = page.page
+
+        # 尝试多种方式获取 WebDriver
+        if hasattr(page, 'driver'):
+            driver = page.driver
+            debug_print("使用 page.driver")
         elif hasattr(page, '_driver'):
             driver = page._driver
+            debug_print("使用 page._driver")
+        elif hasattr(page, 'page'):
+            driver = page.page
+            debug_print("使用 page.page")
         else:
-            try:
-                driver = page.driver
-            except:
-                pass
+            # 尝试通过属性查找
+            for attr in ['driver', '_driver', 'page']:
+                try:
+                    if hasattr(page, attr):
+                        driver = getattr(page, attr)
+                        debug_print(f"使用 page.{attr}")
+                        break
+                except:
+                    pass
 
         if driver and hasattr(driver, 'get_screenshot_as_file'):
+            debug_print("使用 driver.get_screenshot_as_file")
             driver.get_screenshot_as_file(path)
         else:
+            # 如果 driver 无效，尝试使用 page 的截图方法（如果有）
             try:
-                page.get_screenshot(path)
-            except:
-                pass
-            return
+                if hasattr(page, 'screenshot'):
+                    page.screenshot(path)
+                    debug_print("使用 page.screenshot")
+                elif hasattr(page, 'get_screenshot'):
+                    page.get_screenshot(path)
+                    debug_print("使用 page.get_screenshot")
+                else:
+                    # 最后尝试通过 JS 截图（较复杂，此处省略，可抛出异常）
+                    raise Exception("无法获取截图，没有可用的截图方法")
+            except Exception as e:
+                debug_print(f"page 截图方法失败: {e}")
+                # 尝试使用 driver 的 save_screenshot（如果 driver 存在）
+                if driver and hasattr(driver, 'save_screenshot'):
+                    driver.save_screenshot(path)
+                    debug_print("使用 driver.save_screenshot")
+                else:
+                    raise Exception("所有截图方法均失败")
 
+        # 检查文件是否生成
         if os.path.exists(path):
+            debug_print(f"截图文件已生成: {path}")
             send_telegram_photo(path, caption, bot_token, chat_id)
+        else:
+            debug_print(f"截图文件未生成: {path}")
     except Exception as e:
         print(f"  [截图] 失败: {e}", flush=True)
+        traceback.print_exc()
 
 def notify_success(phone, expiry, bot_token, chat_id):
     msg = f"✅ <b>VPS 续期成功</b>\n\nHAX\n📱 {phone}\n📅 {expiry or '未知'}\n⏰ {get_beijing_time()}"
@@ -586,7 +619,7 @@ def solve_arithmetic_captcha(page):
     print(f"  [CAPTCHA] 算式: {digits[0]} {op_symbol} {digits[1]} = {result}", flush=True)
     return result
 
-# ===================== 续期码获取（新增等待截图） =====================
+# ===================== 续期码获取（含等待截图，修复版） =====================
 def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, timeout=1800, poll_interval=10):
     """
     轮询 Telegram 获取续期码，并每分钟截图发送
@@ -609,14 +642,16 @@ def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, 
     code = ""
     last_screenshot_minute = -1
     while elapsed < timeout:
-        # 每分钟截图并发送
+        # 每分钟截图并发送（如果超过1分钟）
         current_minute = elapsed // 60
         if current_minute > last_screenshot_minute and current_minute > 0:
             last_screenshot_minute = current_minute
+            debug_print(f"准备截图 (已等待 {current_minute} 分钟)")
             try:
                 png_path = f"waiting_{phone}_{current_minute}m.png"
                 take_screenshot(page, png_path, bot_token, chat_id,
                                 f"⏳ 等待续期码 (已等待 {current_minute} 分钟) - {phone}")
+                debug_print(f"截图完成: {png_path}")
             except Exception as e:
                 print(f"  [截图] 等待截图失败: {e}", flush=True)
 
