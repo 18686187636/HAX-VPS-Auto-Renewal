@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (多账号独立 Bot 轮询版)
+HAX VPS Auto-Renewal (多账号独立 Bot 轮询版 - 修正时序)
 """
 import os
 import sys
@@ -34,7 +34,7 @@ PROXY_ADDR = os.getenv("PROXY_SERVER", "socks5://127.0.0.1:1080")
 CODE_FILE = "renewal_code.txt"
 TG_RENEWAL_PATTERN = re.compile(r'[A-Za-z0-9+/=]{32,}')
 DEBUG = os.getenv("DEBUG", "true").lower() == "true"
-SEND_SCREENSHOTS = os.getenv("SEND_SCREENSHOTS", "true").lower() == "true"
+SEND_SCREENSHOTS = os.getenv("SEND_SCREENSHOTS", "true").lower() == "true")
 
 def debug_print(*args, **kwargs):
     if DEBUG:
@@ -830,6 +830,7 @@ def renew_account(account):
         print("  [CF] 等待 CloudFlare 验证 (60s)...", flush=True)
         page.wait(60)
 
+        # ---------- 点击 Renew VPS ----------
         renew_vps_btn = page.ele("css:button[name=submit_button][type=button].btn-primary")
         if not renew_vps_btn:
             raise RuntimeError("未找到 Renew VPS 按钮")
@@ -837,12 +838,9 @@ def renew_account(account):
         print("  [FORM] 点击 Renew VPS", flush=True)
         page.wait(5)
 
-        close_ads(page)
-
-        # ---------- 获取续期码（仅使用当前账号的 Bot） ----------
+        # ---------- 🟢 立即获取续期码（仅使用当前账号的 Bot） ----------
         debug_print("开始获取续期码（仅轮询当前账号的 Bot）")
         print("  [CODE] 等待 @HaxTG_bot 发送续期码...", flush=True)
-        # 只使用当前账号自己的 Bot
         current_bot = [{"token": bot_token, "label": f"...{bot_token[-6:]}"}] if bot_token else []
         if not current_bot:
             raise RuntimeError("当前账号未配置 bot_token")
@@ -859,6 +857,9 @@ def renew_account(account):
             raise RuntimeError("未获取到续期码")
 
         print(f"  [CODE] 获取到续期码: {code[:20]}***", flush=True)
+
+        # ---------- 现在关闭广告（不影响续期码获取） ----------
+        close_ads(page)
 
         # ---------- 进入续期码输入页 ----------
         debug_print("进入续期码输入页")
@@ -1004,7 +1005,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (多账号独立 Bot 轮询版)", flush=True)
+    print("   HAX 自动续期 (多账号独立 Bot 轮询版 - 修正时序)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
