@@ -794,11 +794,11 @@ def renew_account(account):
                 login_success = True
             else:
                 print("  ⚠️ Cookie 未生效，将执行 OAuth", flush=True)
-                try:
-                    take_screenshot(page, f"cookie_fail_{phone}.png", bot_token, chat_id,
-                                    f"❌ Cookie 登录失败 - {phone}")
-                except:
-                    pass
+                # try:
+                #    take_screenshot(page, f"cookie_fail_{phone}.png", bot_token, chat_id,
+                #                   f"❌ Cookie 登录失败 - {phone}")
+                # except:
+                #   pass
 
         if not login_success:
             debug_print("Cookie 登录失败，执行 OAuth")
@@ -979,11 +979,11 @@ def renew_account(account):
         close_ads(page)  # 先关闭可能遮挡的广告
 
         # 在点击提交按钮之前截图，记录表单状态
-        try:
-            take_screenshot(page, f"before_submit_{phone}.png", bot_token, chat_id,
-                            f"📝 提交前截图 - {phone} (已填好续期码和reCAPTCHA)")
-        except Exception as e:
-            print(f"  [截图] 提交前截图失败: {e}", flush=True)
+        # try:
+        #    take_screenshot(page, f"before_submit_{phone}.png", bot_token, chat_id,
+        #                   f"📝 提交前截图 - {phone} (已填好续期码和reCAPTCHA)")
+        # except Exception as e:
+        #   print(f"  [截图] 提交前截图失败: {e}", flush=True)
 
         # 查找提交按钮
         submit_btn = None
