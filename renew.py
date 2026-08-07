@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (10秒后提取最新消息)
+HAX VPS Auto-Renewal (10秒后提取最新消息 + 滚动修复)
 """
 import os
 import sys
@@ -29,12 +29,12 @@ except ImportError:
 # ===================== 环境变量 =====================
 ACCOUNTS_JSON = os.getenv("ACCOUNTS_JSON", "[]")
 ACCOUNTS = json.loads(ACCOUNTS_JSON)
-HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
+HEADLESS = os.getenv("HEADLESS", "true").lower() == "true")
 PROXY_ADDR = os.getenv("PROXY_SERVER", "socks5://127.0.0.1:1080")
 CODE_FILE = "renewal_code.txt"
 TG_RENEWAL_PATTERN = re.compile(r'[A-Za-z0-9+/=]{32,}')
 DEBUG = os.getenv("DEBUG", "true").lower() == "true"
-SEND_SCREENSHOTS = os.getenv("SEND_SCREENSHOTS", "true").lower() == "true"
+SEND_SCREENSHOTS = os.getenv("SEND_SCREENSHOTS", "true").lower() == "true")
 
 def debug_print(*args, **kwargs):
     if DEBUG:
@@ -688,6 +688,15 @@ def handle_consent(page):
         debug_print(f"处理 Consent 失败: {e}")
         return False
 
+# ===================== 滚动到元素可见（辅助函数） =====================
+def scroll_to_element(page, selector):
+    """通过 JS 滚动到指定选择器元素可见"""
+    try:
+        page.run_js(f"document.querySelector('{selector}').scrollIntoView({{block: 'center', behavior: 'instant'}});")
+        time.sleep(0.3)
+    except Exception:
+        pass
+
 # ===================== 单账号续期主流程 =====================
 def renew_account(account):
     phone = account.get("phone")
@@ -716,7 +725,8 @@ def renew_account(account):
     page = None
     try:
         debug_print("准备启动浏览器...")
-        launch_args = {"headless": HEADLESS, "window_size": (1366, 768)}
+        # 增大窗口尺寸，避免滚动越界
+        launch_args = {"headless": HEADLESS, "window_size": (1920, 1080)}
         if proxies is not None:
             launch_args["proxy"] = PROXY_ADDR
         print("  [BROWSER] 正在启动浏览器（此步骤可能较慢）...", flush=True)
@@ -788,14 +798,23 @@ def renew_account(account):
         print("  [NAV] 点击 VPS Renew", flush=True)
         page.wait(5)
 
-        # 填写表单
+        # 填写表单（加入滚动修复）
         debug_print("填写续期表单")
         web_input = page.ele("css:#web_address")
         if web_input:
-            web_input.input("hax.co.id", clear=True)
+            # 滚动到元素可见
+            scroll_to_element(page, "#web_address")
+            try:
+                web_input.input("hax.co.id", clear=True)
+            except Exception as e:
+                # 如果点击错误，使用 JS 直接设置值
+                print(f"  [FORM] 输入框点击失败: {e}，使用 JS 设置值", flush=True)
+                page.run_js("document.querySelector('#web_address').value = 'hax.co.id';")
             print("  [FORM] 输入域名", flush=True)
+
         agreement = page.ele('css:input[name="agreement"][value="yes"]')
         if agreement and not agreement.is_checked:
+            scroll_to_element(page, "input[name='agreement'][value='yes']")
             agreement.click_self(by_js=True)
             print("  [FORM] 勾选协议", flush=True)
 
@@ -806,6 +825,7 @@ def renew_account(account):
         renew_vps_btn = page.ele("css:button[name=submit_button][type=button].btn-primary")
         if not renew_vps_btn:
             raise RuntimeError("未找到 Renew VPS 按钮")
+        scroll_to_element(page, "button[name='submit_button'][type='button'].btn-primary")
         renew_vps_btn.click_self(by_js=True)
         print("  [FORM] 点击 Renew VPS", flush=True)
         page.wait(5)
@@ -839,6 +859,7 @@ def renew_account(account):
                 pass
         if not renew_code_link:
             raise RuntimeError("未找到 INPUT RENEW CODE 按钮")
+        scroll_to_element(page, "a.btn[href='/vps-renew-code']")
         renew_code_link.click_self(by_js=True)
         print("  [NAV] 点击 INPUT RENEW CODE", flush=True)
         page.wait.doc_loaded(timeout=15)
@@ -851,6 +872,7 @@ def renew_account(account):
         if captcha_result is not None:
             code_input = page.ele("css:#captcha")
             if code_input:
+                scroll_to_element(page, "#captcha")
                 code_input.input(str(captcha_result), clear=True)
                 print(f"  [CAPTCHA] 输入结果: {captcha_result}", flush=True)
 
@@ -865,6 +887,7 @@ def renew_account(account):
             except Exception:
                 pass
         if vcode_input:
+            scroll_to_element(page, "input.form-control:not(#captcha)")
             vcode_input.input(code, clear=True)
             print(f"  [CODE] 输入续期码: {code[:15]}***", flush=True)
 
@@ -901,6 +924,7 @@ def renew_account(account):
             for btn in all_btns:
                 print(f"    button: name={btn.attr('name')} class={btn.attr('class')} text={btn.text.strip()[:50]}", flush=True)
             raise RuntimeError("未找到提交按钮")
+        scroll_to_element(page, "button[name='submit_button']")
         try:
             submit_btn.click_self(by_js=True)
         except Exception:
@@ -967,7 +991,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (10秒后提取最新消息)", flush=True)
+    print("   HAX 自动续期 (10秒后提取最新消息 + 滚动修复)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
