@@ -2,8 +2,8 @@ name: HAX Auto Renew
 
 on:
   schedule:
-    - cron: '0 0 * * *'          # 每天 UTC 00:00（北京时间 08:00）
-  workflow_dispatch:             # 允许手动触发
+    - cron: '0 0 * * *'
+  workflow_dispatch:
 
 jobs:
   renew:
@@ -11,28 +11,26 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: Install system dependencies and Python packages
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y xvfb x11-utils wget net-tools jq firefox ffmpeg curl
           pip install --upgrade pip
           pip install -r requirements.txt
-          # 安装 ruyipage 并下载其浏览器内核（Firefox）
           pip install ruyiPage --upgrade
           python -m ruyipage install
 
       - name: Verify ruyipage installation
         run: python -c "import ruyipage; print(ruyipage.__version__)"
 
-      - name: Configure sing-box proxy (if NODE_LINK provided)
+      - name: Configure sing-box proxy
         if: env.NODE_LINK != ''
         env:
           NODE_LINK: ${{ secrets.NODE_LINK }}
@@ -135,25 +133,11 @@ jobs:
           config = {
               "log": {"level": "warn"},
               "inbounds": [
-                  {
-                      "type": "socks",
-                      "tag": "socks-in",
-                      "listen": "127.0.0.1",
-                      "listen_port": 1080
-                  },
-                  {
-                      "type": "http",
-                      "tag": "http-in",
-                      "listen": "127.0.0.1",
-                      "listen_port": 1081
-                  }
+                  {"type": "socks", "tag": "socks-in", "listen": "127.0.0.1", "listen_port": 1080},
+                  {"type": "http", "tag": "http-in", "listen": "127.0.0.1", "listen_port": 1081}
               ],
               "outbounds": [outbound],
-              "route": {
-                  "rules": [
-                      {"outbound": "vless-out", "protocol": ["tcp", "udp"]}
-                  ]
-              }
+              "route": {"rules": [{"outbound": "vless-out", "protocol": ["tcp", "udp"]}]}
           }
           with open("sing-box-config.json", "w") as f:
               json.dump(config, f, indent=2)
@@ -176,26 +160,36 @@ jobs:
             echo "⚠️ No config file generated, skipping proxy"
           fi
 
-      - name: Print sing-box log (debug)
+      - name: Print sing-box log
         if: always()
         run: cat sing-box.log || true
 
-      - name: Run renewal script with Xvfb
+      - name: Start forwarder and run renewal
         env:
+          # Userbot 转发器配置
+          API_ID: ${{ secrets.API_ID }}
+          API_HASH: ${{ secrets.API_HASH }}
+          SESSION_STRING: ${{ secrets.SESSION_STRING }}
+          TARGET_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TARGET_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          # 续期脚本配置
           ACCOUNTS_JSON: ${{ secrets.ACCOUNTS_JSON }}
           HEADLESS: "true"
           PROXY_SERVER: ${{ secrets.NODE_LINK != '' && 'http://127.0.0.1:1081' || '' }}
         run: |
-          if [ -n "$PROXY_SERVER" ]; then
-            echo "🔗 Proxy enabled: $PROXY_SERVER"
-            echo "🧪 Testing proxy connectivity..."
-            curl -x "$PROXY_SERVER" -s https://api.ipify.org && echo " ✅ curl proxy test successful" || echo " ⚠️ curl proxy test failed"
-          else
-            echo "🍭 Proxy disabled, using direct connection"
-          fi
+          # 后台启动转发器
+          python3 forwarder.py &
+          FORWARDER_PID=$!
+          echo "🚀 转发器已启动 (PID=$FORWARDER_PID)"
+          sleep 8
+
+          # 运行续期脚本
           xvfb-run --auto-servernum python3 renew.py
 
-      - name: Upload screenshots (if any)
+          # 清理
+          kill $FORWARDER_PID 2>/dev/null || true
+
+      - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -205,7 +199,7 @@ jobs:
             *.log
           if-no-files-found: ignore
 
-      - name: Cleanup processes
+      - name: Cleanup
         if: always()
         run: |
           pkill -f sing-box || true
