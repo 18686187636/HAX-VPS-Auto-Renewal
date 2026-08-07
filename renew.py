@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (最终版 - Consent 提前处理)
+HAX VPS Auto-Renewal (整合本地广告处理逻辑)
+- 多账号支持 (ACCOUNTS_JSON)
+- Cookie 快速登录 + Telegram OAuth 回退
+- 本地脚本式广告关闭 (等待3秒 → ESC → 关键词点击)
+- Consent 弹窗处理
+- 算术验证码 + 音频 reCAPTCHA
+- 续期码多 Bot 轮询
+- Telegram 通知 + 截图
 """
 import os
 import sys
@@ -34,7 +41,7 @@ PROXY_ADDR = os.getenv("PROXY_SERVER", "socks5://127.0.0.1:1080")
 CODE_FILE = "renewal_code.txt"
 TG_RENEWAL_PATTERN = re.compile(r'[A-Za-z0-9+/=]{32,}')
 DEBUG = os.getenv("DEBUG", "true").lower() == "true"
-SEND_SCREENSHOTS = os.getenv("SEND_SCREENSHOTS", "true").lower() == "true"
+SEND_SCREENSHOTS = os.getenv("SEND_SCREENSHOTS", "true").lower() == "true")
 
 def debug_print(*args, **kwargs):
     if DEBUG:
@@ -179,7 +186,7 @@ def is_logged_in(page):
     except:
         return False
 
-# ===================== Telegram OAuth 登录 =====================
+# ===================== Telegram OAuth 登录（本地脚本方式） =====================
 def login_with_telegram_original(page, phone):
     debug_print("进入 login_with_telegram_original")
     print(f"  [LOGIN] 尝试 Telegram OAuth 登录: {phone}", flush=True)
@@ -262,7 +269,7 @@ def set_session_cookie(page, session_token):
         debug_print(f"JS 注入失败: {e}")
     return False
 
-# ===================== reCAPTCHA 音频求解 =====================
+# ===================== reCAPTCHA 音频求解（从本地脚本移植） =====================
 def find_frame(page, keyword):
     try:
         frames = page.get_frames()
@@ -611,7 +618,7 @@ def solve_arithmetic_captcha(page):
     print(f"  [CAPTCHA] 算式: {digits[0]} {op_symbol} {digits[1]} = {result}", flush=True)
     return result
 
-# ===================== 续期码获取（含等待截图） =====================
+# ===================== 续期码获取（多 Bot 轮询） =====================
 def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, timeout=1800, poll_interval=10):
     debug_print(f"进入 get_renewal_code_from_telegram，超时 {timeout}s")
     offsets = {}
@@ -669,75 +676,26 @@ def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, 
             print(f"  [CODE] 等待中... ({elapsed//60} 分钟)", flush=True)
     return "", None
 
-# ===================== 弹窗关闭函数 =====================
-def close_all_popups(page):
+# ===================== 广告关闭（本地脚本逻辑） =====================
+def close_ads(page):
+    """按照本地脚本方式关闭广告弹窗"""
+    print("  [AD] 等待并关闭广告...")
+    page.wait(3)
     try:
-        # 按 ESC
+        page.actions.press(Keys.ESCAPE).perform()
+        page.wait(1)
+    except Exception:
+        pass
+    for keyword in ["Close", "close", "×", "关闭"]:
         try:
-            page.actions.press(Keys.ESCAPE).perform()
-            time.sleep(0.5)
-        except:
+            el = page.ele(f'xpath://*[contains(text(), "{keyword}")]')
+            if el and el.is_displayed:
+                el.click_self()
+                page.wait(1)
+                break
+        except Exception:
             pass
-
-        # 点击关闭按钮（各类选择器）
-        close_selectors = [
-            "xpath://*[contains(text(), 'Close') or contains(text(), '关闭') or contains(text(), '×')]",
-            "css:.close, .popup-close, .modal-close, [class*='close']",
-            "css:[aria-label='Close'], [aria-label='关闭']",
-            "css:.modal-header .close, .modal-footer .close",
-            "css:.popup .close, .ad-close",
-        ]
-        for selector in close_selectors:
-            try:
-                elements = page.eles(selector, timeout=1)
-                for el in elements:
-                    if el and el.is_displayed:
-                        el.click_self()
-                        time.sleep(0.5)
-                        debug_print(f"点击关闭元素: {selector}")
-                        break
-            except:
-                continue
-
-        # 通过 JS 尝试点击关闭按钮
-        page.run_js("""
-            (function() {
-                var btns = document.querySelectorAll('button, a, span, div');
-                for (var i = 0; i < btns.length; i++) {
-                    var el = btns[i];
-                    var txt = (el.textContent || '').toLowerCase();
-                    if (txt.includes('close') || txt.includes('×') || txt.includes('关闭') ||
-                        (el.className && el.className.includes('close')) ||
-                        (el.id && el.id.includes('close'))) {
-                        if (el.offsetParent !== null) {
-                            el.click();
-                            break;
-                        }
-                    }
-                }
-            })();
-        """)
-        time.sleep(0.5)
-
-        # 移除 overlay
-        page.run_js("""
-            (function() {
-                var overlays = document.querySelectorAll('.overlay, .modal-backdrop, .popup-overlay, [class*="overlay"]');
-                overlays.forEach(function(el) { el.remove(); });
-            })();
-        """)
-        time.sleep(0.5)
-
-        try:
-            page.actions.press(Keys.ESCAPE).perform()
-            time.sleep(0.5)
-        except:
-            pass
-
-        return True
-    except Exception as e:
-        debug_print(f"关闭弹窗异常: {e}")
-        return False
+    page.wait(3)
 
 # ===================== 处理 Consent 弹窗 =====================
 def handle_consent(page):
@@ -815,10 +773,6 @@ def renew_account(account):
             if is_logged_in(page):
                 print("  ✅ Cookie 登录成功", flush=True)
                 login_success = True
-                # ---------- 🟢 立即处理 Consent 和弹窗 ----------
-                debug_print("检测并处理 Consent 弹窗（Cookie 登录后）")
-                handle_consent(page)
-                close_all_popups(page)
             else:
                 print("  ⚠️ Cookie 未生效，将执行 OAuth", flush=True)
                 try:
@@ -833,10 +787,6 @@ def renew_account(account):
             login_success = login_with_telegram_original(page, phone)
             if not login_success:
                 raise RuntimeError("Telegram 登录失败")
-            # ---------- 🟢 立即处理 Consent 和弹窗 ----------
-            debug_print("检测并处理 Consent 弹窗（OAuth 登录后）")
-            handle_consent(page)
-            close_all_popups(page)
 
         # 再次确认登录
         if not is_logged_in(page):
@@ -849,19 +799,16 @@ def renew_account(account):
                 raise RuntimeError("无法确认登录状态")
 
         print("  ✅ 登录成功，开始续期流程", flush=True)
+
+        # ----- 1. 处理 Consent 和广告（本地脚本方式） -----
+        handle_consent(page)
+        close_ads(page)   # 登录后的首次广告关闭
+
+        # 登录成功截图
         try:
             take_screenshot(page, f"login_success_{phone}.png", bot_token, chat_id, f"✅ 登录成功 - {phone}")
         except Exception as e:
             print(f"  [截图] 登录截图失败: {e}", flush=True)
-
-        # ---------- 后续流程（广告、续期等） ----------
-        # 注意：Consent 已提前处理，这里不再重复，但可再调用一次以确保
-        # 但我们将后续广告处理保留，不再调用 handle_consent（避免干扰）
-        debug_print("处理广告")
-        print("  [AD] 等待并关闭广告...", flush=True)
-        page.wait(3)
-        close_all_popups(page)
-        page.wait(2)
 
         # ---------- 导航到续期 ----------
         debug_print("导航到 VPS 续期")
@@ -907,12 +854,13 @@ def renew_account(account):
         print("  [FORM] 点击 Renew VPS", flush=True)
         page.wait(5)
 
+        # ----- 2. 点击 Renew VPS 后可能弹出广告 -----
+        close_ads(page)
+
         try:
             take_screenshot(page, f"renew_vps_{phone}.png", bot_token, chat_id, f"🔄 已点击 Renew VPS - {phone}")
         except Exception as e:
             print(f"  [截图] Renew VPS 截图失败: {e}", flush=True)
-
-        close_all_popups(page)
 
         # ---------- 获取续期码 ----------
         debug_print("开始获取续期码")
@@ -966,7 +914,9 @@ def renew_account(account):
         print("  [NAV] 点击 INPUT RENEW CODE", flush=True)
         page.wait.doc_loaded(timeout=15)
         page.wait(3)
-        close_all_popups(page)
+
+        # ----- 3. 进入续期码页后可能弹出广告 -----
+        close_ads(page)
 
         # ---------- 算术验证码 ----------
         captcha_result = solve_arithmetic_captcha(page)
@@ -1010,7 +960,8 @@ def renew_account(account):
         # ---------- 提交 ----------
         debug_print("提交续期")
         print("  [SUBMIT] 提交续期...", flush=True)
-        close_all_popups(page)
+        # ----- 4. 提交前可能弹窗 -----
+        close_ads(page)
         submit_btn = None
         for selector in [
             "css:button[name=submit_button]",
@@ -1039,9 +990,8 @@ def renew_account(account):
 
         # ---------- 检查结果 ----------
         debug_print("检查续期结果")
-        for _ in range(3):
-            close_all_popups(page)
-            time.sleep(1)
+        # 再次关闭可能的广告
+        close_ads(page)
         page.wait.doc_loaded(timeout=15)
         page.wait(3)
         result_text = page.run_js("document.body.innerText") or ""
@@ -1108,7 +1058,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (最终版)", flush=True)
+    print("   HAX 自动续期 (本地广告逻辑版)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
