@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (10秒后提取最新消息 + 滚动修复)
+HAX VPS Auto-Renewal (10秒后提取最新消息 + 滚动修复 + 全部更新)
 """
 import os
 import sys
@@ -611,12 +611,13 @@ def solve_arithmetic_captcha(page):
     print(f"  [CAPTCHA] 算式: {digits[0]} {op_symbol} {digits[1]} = {result}", flush=True)
     return result
 
-# ===================== 获取最新消息 =====================
+# ===================== 获取最新消息（不加 limit，取最后一条） =====================
 def get_latest_message(bot_token):
     """获取目标 Bot 的最新一条消息，若包含续期码则返回，否则返回 None"""
     try:
         proxies = get_proxies()
-        url = f"https://api.telegram.org/bot{bot_token}/getUpdates?limit=1"
+        # 不加 limit，获取所有更新，取最后一条（最新）
+        url = f"https://api.telegram.org/bot{bot_token}/getUpdates"
         resp = req_lib.get(url, timeout=15, proxies=proxies) if proxies else req_lib.get(url, timeout=15)
         data = resp.json()
         if data.get("ok"):
@@ -688,9 +689,8 @@ def handle_consent(page):
         debug_print(f"处理 Consent 失败: {e}")
         return False
 
-# ===================== 滚动到元素可见（辅助函数） =====================
+# ===================== 滚动到元素可见 =====================
 def scroll_to_element(page, selector):
-    """通过 JS 滚动到指定选择器元素可见"""
     try:
         page.run_js(f"document.querySelector('{selector}').scrollIntoView({{block: 'center', behavior: 'instant'}});")
         time.sleep(0.3)
@@ -725,7 +725,6 @@ def renew_account(account):
     page = None
     try:
         debug_print("准备启动浏览器...")
-        # 增大窗口尺寸，避免滚动越界
         launch_args = {"headless": HEADLESS, "window_size": (1920, 1080)}
         if proxies is not None:
             launch_args["proxy"] = PROXY_ADDR
@@ -798,17 +797,14 @@ def renew_account(account):
         print("  [NAV] 点击 VPS Renew", flush=True)
         page.wait(5)
 
-        # 填写表单（加入滚动修复）
+        # 填写表单
         debug_print("填写续期表单")
         web_input = page.ele("css:#web_address")
         if web_input:
-            # 滚动到元素可见
             scroll_to_element(page, "#web_address")
             try:
                 web_input.input("hax.co.id", clear=True)
-            except Exception as e:
-                # 如果点击错误，使用 JS 直接设置值
-                print(f"  [FORM] 输入框点击失败: {e}，使用 JS 设置值", flush=True)
+            except Exception:
                 page.run_js("document.querySelector('#web_address').value = 'hax.co.id';")
             print("  [FORM] 输入域名", flush=True)
 
@@ -991,7 +987,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (10秒后提取最新消息 + 滚动修复)", flush=True)
+    print("   HAX 自动续期 (10秒后提取最新消息 - 无limit)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
