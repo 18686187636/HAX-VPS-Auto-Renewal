@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (轮询就绪版)
+HAX VPS Auto-Renewal (轮询就绪版 - 点击提前)
 """
 import os
 import sys
@@ -612,8 +612,8 @@ def solve_arithmetic_captcha(page):
     print(f"  [CAPTCHA] 算式: {digits[0]} {op_symbol} {digits[1]} = {result}", flush=True)
     return result
 
-# ===================== 增强轮询（含就绪事件） =====================
-def poll_code(bot_tokens, timeout, poll_interval, ready_event=None):
+# ===================== 轮询函数（含就绪事件） =====================
+def poll_code(bot_tokens, timeout, poll_interval):
     if not bot_tokens:
         return None
     debug_print(f"轮询线程启动，超时 {timeout}s，监听 {len(bot_tokens)} 个 Bot")
@@ -663,10 +663,6 @@ def poll_code(bot_tokens, timeout, poll_interval, ready_event=None):
         except Exception as e:
             print(f"  [轮询] 初始化偏移量异常: {e}", flush=True)
             offsets[bt['token']] = 0
-
-    # 进入轮询主循环前，设置就绪事件（如果提供）
-    if ready_event:
-        ready_event.set()
 
     elapsed = 0
     while elapsed < timeout:
@@ -862,6 +858,14 @@ def renew_account(account):
         print("  [CF] 等待 CloudFlare 验证 (60s)...", flush=True)
         page.wait(60)
 
+        # ---------- 点击 Renew VPS ----------
+        renew_vps_btn = page.ele("css:button[name=submit_button][type=button].btn-primary")
+        if not renew_vps_btn:
+            raise RuntimeError("未找到 Renew VPS 按钮")
+        renew_vps_btn.click_self(by_js=True)
+        print("  [FORM] 点击 Renew VPS", flush=True)
+        page.wait(5)
+
         # ---------- 准备轮询续期码（后台线程） ----------
         current_bot = [{"token": bot_token, "label": f"...{bot_token[-6:]}"}] if bot_token else []
         if not current_bot:
@@ -872,32 +876,17 @@ def renew_account(account):
         poll_timeout = 1800
         poll_interval = 3
 
-        # 使用 Event 同步线程启动
-        poll_ready = threading.Event()
-
         debug_print("启动后台轮询线程...")
         def poll_target():
             nonlocal code
-            code = poll_code(current_bot, poll_timeout, poll_interval, ready_event=poll_ready)
+            code = poll_code(current_bot, poll_timeout, poll_interval)
 
         poll_thread = threading.Thread(target=poll_target, daemon=True)
         poll_thread.start()
 
-        # 等待轮询线程就绪（最多等待 10 秒）
-        if not poll_ready.wait(timeout=10):
-            debug_print("轮询线程未能在 10 秒内就绪，继续执行")
-        else:
-            debug_print("轮询线程已就绪")
-
+        # 等待轮询线程打印第一条状态（0 分钟）
+        time.sleep(0.5)  # 让线程有时间打印 "轮询中... (0 分钟)"
         print("  [CODE] 等待 @HaxTG_bot 发送续期码...", flush=True)
-
-        # ---------- 点击 Renew VPS ----------
-        renew_vps_btn = page.ele("css:button[name=submit_button][type=button].btn-primary")
-        if not renew_vps_btn:
-            raise RuntimeError("未找到 Renew VPS 按钮")
-        renew_vps_btn.click_self(by_js=True)
-        print("  [FORM] 点击 Renew VPS", flush=True)
-        page.wait(5)
 
         # ---------- 等待轮询结果（主线程等待，同时截图） ----------
         start_wait = time.time()
@@ -1072,7 +1061,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (轮询就绪版)", flush=True)
+    print("   HAX 自动续期 (轮询就绪版 - 点击提前)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
