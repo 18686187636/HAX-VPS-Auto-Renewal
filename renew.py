@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (10秒后读取文件或 Bot 最新消息)
+HAX VPS Auto-Renewal (增强结果检查)
 """
 import os
 import sys
@@ -945,18 +945,34 @@ def renew_account(account):
         print("  [SUBMIT] 已点击提交，等待结果...", flush=True)
         time.sleep(60)
 
-        # ---------- 检查结果 ----------
+        # ---------- 检查结果（增强弹窗清理） ----------
         debug_print("检查续期结果")
         for _ in range(3):
             close_ads(page)
             time.sleep(1)
+        # 额外使用 JS 移除所有可能的遮挡
+        page.run_js("""
+            document.querySelectorAll('.overlay, .modal, .popup, [class*="overlay"], [class*="modal"], [class*="popup"]')
+                .forEach(el => el.remove());
+        """)
+        time.sleep(2)
         page.wait.doc_loaded(timeout=15)
         page.wait(3)
+        # 再次关闭一次
         close_ads(page)
+
+        # 重新获取页面内容（可能因弹窗导致加载中断）
         result_text = page.run_js("document.body.innerText") or ""
+        # 若结果为空，尝试刷新页面或等待更久
+        if not result_text.strip():
+            print("  [RESULT] 页面内容为空，等待 5 秒后重试...", flush=True)
+            time.sleep(5)
+            result_text = page.run_js("document.body.innerText") or ""
+
         result_lower = result_text.lower()
         is_success = False
         expiry_date = None
+
         success_keywords = [
             "renewed successfully",
             "renewal successful",
@@ -965,6 +981,7 @@ def renew_account(account):
             "续期成功",
             "renewed",
         ]
+        # 如果成功关键字出现，则判定成功
         if any(kw in result_lower for kw in success_keywords):
             is_success = True
             print("  [RESULT] 检测到续期成功！", flush=True)
@@ -979,6 +996,17 @@ def renew_account(account):
                     expiry_date = m.group(1)
                     print(f"  [RESULT] 到期日: {expiry_date}", flush=True)
                     break
+        else:
+            # 打印部分页面内容用于调试
+            print(f"  [RESULT] 页面内容片段: {result_text[:200]}...", flush=True)
+
+        try:
+            result_png = f"result_{phone}.png"
+            status = "成功" if is_success else "失败"
+            caption = f"{'✅' if is_success else '❌'} {status} - {phone}\n到期日: {expiry_date or '未知'}"
+            take_screenshot(page, result_png, bot_token, chat_id, caption)
+        except Exception as e:
+            print(f"  [截图] 结果截图失败: {e}", flush=True)
 
         if is_success:
             notify_success(phone, expiry_date or "未知日期", bot_token, chat_id)
@@ -1004,7 +1032,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (文件 + Bot 双重读取)", flush=True)
+    print("   HAX 自动续期 (增强结果检查)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
