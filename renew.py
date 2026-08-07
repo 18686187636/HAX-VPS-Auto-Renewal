@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (轮询优先版)
+HAX VPS Auto-Renewal (轮询就绪版)
 """
 import os
 import sys
@@ -612,8 +612,8 @@ def solve_arithmetic_captcha(page):
     print(f"  [CAPTCHA] 算式: {digits[0]} {op_symbol} {digits[1]} = {result}", flush=True)
     return result
 
-# ===================== 增强轮询（含最新消息捕获，并在启动时立即打印状态） =====================
-def poll_code(bot_tokens, timeout, poll_interval):
+# ===================== 增强轮询（含就绪事件） =====================
+def poll_code(bot_tokens, timeout, poll_interval, ready_event=None):
     if not bot_tokens:
         return None
     debug_print(f"轮询线程启动，超时 {timeout}s，监听 {len(bot_tokens)} 个 Bot")
@@ -663,6 +663,11 @@ def poll_code(bot_tokens, timeout, poll_interval):
         except Exception as e:
             print(f"  [轮询] 初始化偏移量异常: {e}", flush=True)
             offsets[bt['token']] = 0
+
+    # 进入轮询主循环前，设置就绪事件（如果提供）
+    if ready_event:
+        ready_event.set()
+
     elapsed = 0
     while elapsed < timeout:
         for bt in bot_tokens:
@@ -817,7 +822,6 @@ def renew_account(account):
 
         print("  ✅ 登录成功，开始续期流程", flush=True)
 
-        # 处理 Consent 和广告（在点击前必须执行）
         handle_consent(page)
         close_ads(page)
 
@@ -865,21 +869,26 @@ def renew_account(account):
 
         code = None
         poll_thread = None
-        poll_timeout = 1800  # 30 分钟
-        poll_interval = 3    # 轮询间隔 3 秒
+        poll_timeout = 1800
+        poll_interval = 3
 
-        # 启动轮询线程（在点击前开始）
+        # 使用 Event 同步线程启动
+        poll_ready = threading.Event()
+
         debug_print("启动后台轮询线程...")
         def poll_target():
             nonlocal code
-            code = poll_code(current_bot, poll_timeout, poll_interval)
+            code = poll_code(current_bot, poll_timeout, poll_interval, ready_event=poll_ready)
 
         poll_thread = threading.Thread(target=poll_target, daemon=True)
         poll_thread.start()
-        
-        # 等待轮询线程第一次打印状态（"轮询中... (0 分钟)"）
-        debug_print("等待轮询线程初始化...")
-        time.sleep(2)  # 给线程时间执行并打印第一条状态
+
+        # 等待轮询线程就绪（最多等待 10 秒）
+        if not poll_ready.wait(timeout=10):
+            debug_print("轮询线程未能在 10 秒内就绪，继续执行")
+        else:
+            debug_print("轮询线程已就绪")
+
         print("  [CODE] 等待 @HaxTG_bot 发送续期码...", flush=True)
 
         # ---------- 点击 Renew VPS ----------
@@ -1063,7 +1072,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (轮询优先版)", flush=True)
+    print("   HAX 自动续期 (轮询就绪版)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
