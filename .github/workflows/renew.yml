@@ -2,8 +2,8 @@ name: HAX Auto Renew
 
 on:
   schedule:
-    - cron: '0 0 * * *'
-  workflow_dispatch:
+    - cron: '0 0 * * *'          # 每天 UTC 00:00（北京时间 08:00）
+  workflow_dispatch:             # 允许手动触发
 
 jobs:
   renew:
@@ -22,9 +22,15 @@ jobs:
       - name: Install system dependencies and Python packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb x11-utils wget net-tools jq chromium-browser ffmpeg curl
+          sudo apt-get install -y xvfb x11-utils wget net-tools jq firefox ffmpeg curl
           pip install --upgrade pip
           pip install -r requirements.txt
+          # 安装 ruyipage 并下载其浏览器内核（Firefox）
+          pip install ruyiPage --upgrade
+          python -m ruyipage install
+
+      - name: Verify ruyipage installation
+        run: python -c "import ruyipage; print(ruyipage.__version__)"
 
       - name: Configure sing-box proxy (if NODE_LINK provided)
         if: env.NODE_LINK != ''
@@ -203,5 +209,6 @@ jobs:
         if: always()
         run: |
           pkill -f sing-box || true
-          pkill -f chromium || true
+          pkill -f firefox || true
+          pkill -f geckodriver || true
           pkill -f Xvfb || true
