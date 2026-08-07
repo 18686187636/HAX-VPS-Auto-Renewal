@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (轮询优先版 - 取最新消息)
+HAX VPS Auto-Renewal (轮询取最新消息)
 """
 import os
 import sys
@@ -612,7 +612,7 @@ def solve_arithmetic_captcha(page):
     print(f"  [CAPTCHA] 算式: {digits[0]} {op_symbol} {digits[1]} = {result}", flush=True)
     return result
 
-# ===================== 全新轮询：始终获取最新一条消息 =====================
+# ===================== 轮询取最新消息 =====================
 def poll_code(bot_tokens, timeout, poll_interval):
     if not bot_tokens:
         return None
@@ -620,7 +620,6 @@ def poll_code(bot_tokens, timeout, poll_interval):
     
     print("  [CODE] 轮询中... (0 分钟)", flush=True)
 
-    # 初始化 offset 为 0（从第一条消息开始）
     offsets = {bt['token']: 0 for bt in bot_tokens}
     
     elapsed = 0
@@ -635,7 +634,6 @@ def poll_code(bot_tokens, timeout, poll_interval):
                 if data.get("ok"):
                     updates = data.get("result", [])
                     if updates:
-                        # 只处理第一条（最新一条）
                         update = updates[0]
                         offsets[bt['token']] = update["update_id"] + 1
                         msg = update.get("message", {})
@@ -652,7 +650,6 @@ def poll_code(bot_tokens, timeout, poll_interval):
                             else:
                                 print(f"  [轮询] 最新消息不匹配续期码模式", flush=True)
                     else:
-                        # 没有新消息
                         if elapsed > 0 and elapsed % 60 < poll_interval:
                             print(f"  [CODE] 轮询中... ({elapsed//60} 分钟)", flush=True)
                 else:
@@ -779,7 +776,6 @@ def renew_account(account):
 
         print("  ✅ 登录成功，开始续期流程", flush=True)
 
-        # 处理 Consent 和广告（在点击前必须执行）
         handle_consent(page)
         close_ads(page)
 
