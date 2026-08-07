@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Userbot 转发器（增强版：日志 + 重试）
+Userbot 转发器（增强版：转发到 Bot + 写入文件）
 """
 import os
 import asyncio
@@ -17,6 +17,7 @@ API_HASH = os.environ.get('API_HASH', '')
 SESSION_STRING = os.environ.get('SESSION_STRING', '')
 TARGET_BOT_TOKEN = os.environ.get('TARGET_BOT_TOKEN', '')
 TARGET_CHAT_ID = os.environ.get('TARGET_CHAT_ID', '')
+CODE_FILE = "renewal_code.txt"
 
 if not all([API_ID, API_HASH, SESSION_STRING, TARGET_BOT_TOKEN, TARGET_CHAT_ID]):
     print("❌ 缺少必要的环境变量，退出。")
@@ -29,8 +30,20 @@ if len(SESSION_STRING) < 50:
 CODE_PATTERN = re.compile(r'[A-Za-z0-9+/=]{32,}')
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
+def save_code_to_file(code):
+    """将续期码写入文件"""
+    try:
+        with open(CODE_FILE, 'w', encoding='utf-8') as f:
+            f.write(code)
+        print('[Forwarder] ✅ 续期码已写入文件')
+    except Exception as e:
+        print(f'[Forwarder] ⚠️ 写入文件失败: {e}')
+
 def forward_with_retry(text, max_retries=3):
-    """转发消息到目标 Bot，失败时重试"""
+    """转发消息到目标 Bot，失败时重试，并始终写入文件"""
+    # 无论是否转发成功，都先保存到文件
+    save_code_to_file(text)
+    
     url = f'https://api.telegram.org/bot{TARGET_BOT_TOKEN}/sendMessage'
     data = {'chat_id': TARGET_CHAT_ID, 'text': text}
     for attempt in range(max_retries):
