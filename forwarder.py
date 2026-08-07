@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Userbot 转发器：监听 @HaxTG_bot 消息，提取续期码并转发到目标 Bot
-使用 StringSession（支持 Base64 编码的 Session 字符串）
+Userbot 转发器（增强版：日志 + 重试）
 """
 import os
 import asyncio
 import re
 import sys
+import time
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 import requests
@@ -22,36 +22,42 @@ if not all([API_ID, API_HASH, SESSION_STRING, TARGET_BOT_TOKEN, TARGET_CHAT_ID])
     print("❌ 缺少必要的环境变量，退出。")
     sys.exit(1)
 
-# 验证 SESSION_STRING 长度（Base64 编码的 session 文件通常很长）
-if len(SESSION_STRING) < 100:
+if len(SESSION_STRING) < 50:
     print(f"⚠️ SESSION_STRING 过短（{len(SESSION_STRING)} 字符），可能无效")
-    # 不强制退出，让 telethon 自己处理
+    sys.exit(1)
 
 CODE_PATTERN = re.compile(r'[A-Za-z0-9+/=]{32,}')
-
-# 使用 StringSession
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+
+def forward_with_retry(text, max_retries=3):
+    """转发消息到目标 Bot，失败时重试"""
+    url = f'https://api.telegram.org/bot{TARGET_BOT_TOKEN}/sendMessage'
+    data = {'chat_id': TARGET_CHAT_ID, 'text': text}
+    for attempt in range(max_retries):
+        try:
+            resp = requests.post(url, json=data, timeout=15)
+            if resp.status_code == 200 and resp.json().get('ok'):
+                print('[Forwarder] ✅ 续期码已转发到目标 Bot')
+                return True
+            else:
+                print(f'[Forwarder] ⚠️ 转发尝试 {attempt+1} 失败: {resp.text}')
+        except Exception as e:
+            print(f'[Forwarder] ⚠️ 转发尝试 {attempt+1} 异常: {e}')
+        time.sleep(2)
+    print('[Forwarder] ❌ 转发失败（已达到最大重试次数）')
+    return False
 
 @client.on(events.NewMessage(from_users='@HaxTG_bot'))
 async def handler(event):
     text = event.raw_text or ''
-    print(f'[Forwarder] 收到消息: {text[:50]}...')
+    print(f'[Forwarder] 收到消息: {text[:80]}...')
     match = CODE_PATTERN.search(text)
     if match:
         code = match.group(0)
         print(f'[Forwarder] ✅ 捕获到续期码: {code[:20]}...')
-        url = f'https://api.telegram.org/bot{TARGET_BOT_TOKEN}/sendMessage'
-        data = {'chat_id': TARGET_CHAT_ID, 'text': code}
-        try:
-            resp = requests.post(url, json=data, timeout=10)
-            if resp.status_code == 200 and resp.json().get('ok'):
-                print('[Forwarder] ✅ 续期码已转发到目标 Bot')
-            else:
-                print(f'[Forwarder] ❌ 转发失败: {resp.text}')
-        except Exception as e:
-            print(f'[Forwarder] ❌ 网络异常: {e}')
+        forward_with_retry(code)
     else:
-        print('[Forwarder] ⚠️ 消息中未找到续期码')
+        print('[Forwarder] ⚠️ 消息中未找到续期码（可能是其他消息）')
 
 async def main():
     print('[Forwarder] 启动，正在监听 @HaxTG_bot 的消息...')
