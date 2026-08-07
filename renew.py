@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (轮询就绪版 - 点击提前)
+HAX VPS Auto-Renewal (修复轮询偏移量)
 """
 import os
 import sys
@@ -34,7 +34,7 @@ HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
 PROXY_ADDR = os.getenv("PROXY_SERVER", "socks5://127.0.0.1:1080")
 CODE_FILE = "renewal_code.txt"
 TG_RENEWAL_PATTERN = re.compile(r'[A-Za-z0-9+/=]{32,}')
-DEBUG = os.getenv("DEBUG", "true").lower() == "true"
+DEBUG = os.getenv("DEBUG", "true").lower() == "true")
 SEND_SCREENSHOTS = os.getenv("SEND_SCREENSHOTS", "true").lower() == "true"
 
 def debug_print(*args, **kwargs):
@@ -612,52 +612,27 @@ def solve_arithmetic_captcha(page):
     print(f"  [CAPTCHA] 算式: {digits[0]} {op_symbol} {digits[1]} = {result}", flush=True)
     return result
 
-# ===================== 轮询函数（含就绪事件） =====================
+# ===================== 修复后的轮询函数（正确偏移量） =====================
 def poll_code(bot_tokens, timeout, poll_interval):
     if not bot_tokens:
         return None
     debug_print(f"轮询线程启动，超时 {timeout}s，监听 {len(bot_tokens)} 个 Bot")
     
-    # 立即打印一次轮询状态（0 分钟）
     print("  [CODE] 轮询中... (0 分钟)", flush=True)
 
-    # 先获取最新一条消息
+    # ----- 初始化偏移量（只做一次） -----
+    offsets = {}
     for bt in bot_tokens:
         try:
             proxies = get_proxies()
             url = f"https://api.telegram.org/bot{bt['token']}/getUpdates?limit=1"
             resp = req_lib.get(url, timeout=15, proxies=proxies) if proxies else req_lib.get(url, timeout=15)
             data = resp.json()
-            if data.get("ok"):
-                updates = data.get("result", [])
-                if updates:
-                    latest = updates[-1]
-                    msg = latest.get("message", {})
-                    text = msg.get("text", "") or msg.get("caption", "")
-                    if text:
-                        print(f"  [轮询] 获取到最新消息: {text[:80]}...", flush=True)
-                        match = TG_RENEWAL_PATTERN.search(text)
-                        if match:
-                            code = match.group(0)
-                            print(f"  [轮询] ✅ 从最新消息捕获到续期码: {code[:20]}...", flush=True)
-                            with open(CODE_FILE, "w") as f:
-                                f.write(code)
-                            return code
-                        else:
-                            print(f"  [轮询] 最新消息不匹配续期码模式", flush=True)
-        except Exception as e:
-            print(f"  [轮询] 获取最新消息异常: {e}", flush=True)
-    
-    # 正常轮询
-    offsets = {}
-    for bt in bot_tokens:
-        try:
-            proxies = get_proxies()
-            url = f"https://api.telegram.org/bot{bt['token']}/getUpdates"
-            resp = req_lib.get(url, timeout=15, proxies=proxies) if proxies else req_lib.get(url, timeout=15)
-            data = resp.json()
             if data.get("ok") and data.get("result"):
-                offsets[bt['token']] = max(u["update_id"] for u in data["result"]) + 1
+                # 获取最新 update_id，将其作为起始偏移量（不拉取已读）
+                latest_id = max(u["update_id"] for u in data["result"])
+                offsets[bt['token']] = latest_id + 1
+                print(f"  [轮询] 初始化偏移量: {offsets[bt['token']]}", flush=True)
             else:
                 offsets[bt['token']] = 0
         except Exception as e:
@@ -678,6 +653,7 @@ def poll_code(bot_tokens, timeout, poll_interval):
                     if updates:
                         print(f"  [轮询] 收到 {len(updates)} 条新消息", flush=True)
                     for update in updates:
+                        # 更新偏移量（即使消息不匹配，也要更新，避免重复读取）
                         offsets[bt['token']] = update["update_id"] + 1
                         msg = update.get("message", {})
                         text = msg.get("text", "") or msg.get("caption", "")
@@ -1061,7 +1037,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (轮询就绪版 - 点击提前)", flush=True)
+    print("   HAX 自动续期 (修复轮询偏移量)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
