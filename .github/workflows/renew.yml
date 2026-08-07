@@ -21,7 +21,7 @@ jobs:
       - name: 🛠️ 安装系统依赖和 Python 依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb x11-utils wget net-tools jq chromium-browser ffmpeg curl
+          sudo apt-get install -y xvfb x11-utils wget net-tools jq chromium-browser ffmpeg curl scrot
           pip install --upgrade pip
           pip install -r requirements.txt
 
@@ -125,7 +125,6 @@ jobs:
                   "public_key": pbk,
                   "short_id": sid
               }
-          # ✅ 移除 dns 配置，避免版本兼容问题
           config = {
               "log": {"level": "warn"},
               "inbounds": [
@@ -174,11 +173,10 @@ jobs:
         if: always()
         run: cat sing-box.log || true
 
-      - name: 🚀 运行续期脚本
+      - name: 🚀 运行续期脚本（带截图）
         env:
           ACCOUNTS_JSON: ${{ secrets.ACCOUNTS_JSON }}
           HEADLESS: "true"
-          # 优先使用 HTTP 代理（更兼容），若不可用则回退 SOCKS5
           PROXY_SERVER: ${{ secrets.NODE_LINK != '' && 'http://127.0.0.1:1081' || '' }}
         run: |
           if [ -n "$PROXY_SERVER" ]; then
@@ -188,7 +186,27 @@ jobs:
           else
             echo "🍭 未启用代理，直连访问"
           fi
-          xvfb-run --auto-servernum python renew.py
+          # 启动 Xvfb 并运行脚本，同时开启截图功能（使用 scrot）
+          xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" bash -c "
+            python renew.py &
+            PID=\$!
+            # 等待脚本运行，同时定期截图
+            while kill -0 \$PID 2>/dev/null; do
+              scrot -d 10 'screenshot_%Y%m%d_%H%M%S.png'
+              sleep 10
+            done
+            wait \$PID
+          "
+
+      - name: 📸 上传截图
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots
+          path: |
+            *.png
+            *.log
+          if-no-files-found: ignore
 
       - name: 🧽 清理进程
         if: always()
