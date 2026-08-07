@@ -138,7 +138,6 @@ def login_with_telegram(page, phone):
 
         # 获取当前标签页 ID
         original_tab_id = page.tab_id
-        # 查找新标签页
         oauth_tab_id = None
         for tab_id in page.tab_ids:
             if tab_id == original_tab_id:
@@ -168,9 +167,8 @@ def login_with_telegram(page, phone):
         page.wait.doc_loaded(timeout=20)
         time.sleep(5)   # 确保页面完全加载
 
-        # ---- 尝试多种方式定位手机号输入框 ----
+        # ---- 尝试多种方式定位手机号输入框 (使用 states.is_displayed) ----
         phone_input = None
-        # 1) 直接查找
         selectors = [
             "css:#login-phone-code",
             "css:input[name='phone']",
@@ -182,13 +180,14 @@ def login_with_telegram(page, phone):
         ]
         for sel in selectors:
             try:
-                phone_input = page.ele(sel, timeout=2)
-                if phone_input and phone_input.is_displayed:
+                el = page.ele(sel, timeout=2)
+                if el and el.states.is_displayed:
+                    phone_input = el
                     break
             except:
                 continue
 
-        # 2) 如果找不到，尝试点击“使用手机号登录”按钮
+        # 如果找不到，尝试点击“使用手机号登录”按钮
         if not phone_input:
             print("  [LOGIN] 未直接找到手机号输入框，尝试点击'使用手机号登录'...")
             btn_selectors = [
@@ -200,15 +199,15 @@ def login_with_telegram(page, phone):
             ]
             for sel in btn_selectors:
                 try:
-                    phone_btn = page.ele(sel, timeout=2)
-                    if phone_btn and phone_btn.is_displayed:
-                        phone_btn.click()
+                    btn_el = page.ele(sel, timeout=2)
+                    if btn_el and btn_el.states.is_displayed:
+                        btn_el.click()
                         time.sleep(2)
-                        # 再次查找输入框
                         for sel2 in selectors:
                             try:
-                                phone_input = page.ele(sel2, timeout=2)
-                                if phone_input and phone_input.is_displayed:
+                                el2 = page.ele(sel2, timeout=2)
+                                if el2 and el2.states.is_displayed:
+                                    phone_input = el2
                                     break
                             except:
                                 continue
@@ -217,14 +216,14 @@ def login_with_telegram(page, phone):
                 except:
                     continue
 
-        # 3) 如果仍然没有，尝试用 JS 获取页面中的第一个可见 input
+        # 如果仍然没有，尝试用 JS 获取页面中的第一个可见 input
         if not phone_input:
             print("  [LOGIN] 警告：无法定位手机号输入框，尝试使用 JS 查找...")
             input_count = page.run_js("return document.querySelectorAll('input').length;")
             print(f"  [LOGIN] 页面中共 {input_count} 个 input 元素")
             if input_count > 0:
                 first_input = page.ele("css:input", timeout=1)
-                if first_input and first_input.is_displayed:
+                if first_input and first_input.states.is_displayed:
                     phone_input = first_input
                     print("  [LOGIN] 使用第一个可见的 input 作为手机号输入框")
 
@@ -692,7 +691,7 @@ def renew_account(account):
         time.sleep(1)
         for kw in ["Close", "close", "×"]:
             el = page.ele(f'xpath://*[contains(text(), "{kw}")]')
-            if el and el.is_displayed:
+            if el and el.states.is_displayed:
                 el.click()
                 break
         time.sleep(2)
