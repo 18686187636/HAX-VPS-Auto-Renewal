@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (最终稳定版 - 含完整续期码轮询)
-- Cookie 快速登录 + Telegram OAuth 回退
-- 算术验证码 + 音频 reCAPTCHA
-- 多 Bot 轮询获取续期码
-- 广告自动关闭
-- Telegram 通知 + 截图
-- 支持 GitHub Actions 无头运行
+HAX VPS Auto-Renewal (多账号独立 Bot 轮询版)
 """
 import os
 import sys
@@ -617,9 +611,14 @@ def solve_arithmetic_captcha(page):
     print(f"  [CAPTCHA] 算式: {digits[0]} {op_symbol} {digits[1]} = {result}", flush=True)
     return result
 
-# ===================== 续期码获取（多 Bot 轮询，含等待截图） =====================
+# ===================== 续期码获取（仅轮询当前账号的 Bot） =====================
 def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, timeout=1800, poll_interval=10):
-    debug_print(f"进入 get_renewal_code_from_telegram，超时 {timeout}s")
+    """
+    仅轮询指定的 bot_tokens（当前账号的 Bot）
+    """
+    if not bot_tokens:
+        return "", None
+    debug_print(f"进入 get_renewal_code_from_telegram，超时 {timeout}s，监听 {len(bot_tokens)} 个 Bot")
     offsets = {}
     for bt in bot_tokens:
         try:
@@ -675,7 +674,7 @@ def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, 
             print(f"  [CODE] 等待中... ({elapsed//60} 分钟)", flush=True)
     return "", None
 
-# ===================== 广告关闭（增强版） =====================
+# ===================== 广告关闭 =====================
 def close_ads(page):
     print("  [AD] 等待并关闭广告...")
     page.wait(3)
@@ -695,7 +694,6 @@ def close_ads(page):
             pass
     page.wait(3)
 
-# ===================== 处理 Consent 弹窗 =====================
 def handle_consent(page):
     try:
         consent_btn = None
@@ -841,27 +839,21 @@ def renew_account(account):
 
         close_ads(page)
 
-        # ---------- 获取续期码 ----------
-        debug_print("开始获取续期码")
+        # ---------- 获取续期码（仅使用当前账号的 Bot） ----------
+        debug_print("开始获取续期码（仅轮询当前账号的 Bot）")
         print("  [CODE] 等待 @HaxTG_bot 发送续期码...", flush=True)
-        all_bots = []
-        seen = set()
-        for acc in ACCOUNTS:
-            t = acc.get("bot_token")
-            if t and t not in seen:
-                seen.add(t)
-                all_bots.append({"token": t, "label": f"...{t[-6:]}"})
-        if bot_token and bot_token not in seen:
-            all_bots.insert(0, {"token": bot_token, "label": f"...{bot_token[-6:]}"})
-
+        # 只使用当前账号自己的 Bot
+        current_bot = [{"token": bot_token, "label": f"...{bot_token[-6:]}"}] if bot_token else []
+        if not current_bot:
+            raise RuntimeError("当前账号未配置 bot_token")
         code, source = get_renewal_code_from_telegram(
-            all_bots, page, phone, bot_token, chat_id,
+            current_bot, page, phone, bot_token, chat_id,
             timeout=1800, poll_interval=10
         )
         if not code:
             try:
                 take_screenshot(page, f"timeout_{phone}.png", bot_token, chat_id,
-                                f"⏰ 续期码超时 - {phone}\n请检查 HaxTG_bot")
+                                f"⏰ 续期码超时 - {phone}\n请检查 HaxTG_bot 是否发送了续期码到你的 Telegram 账号")
             except:
                 pass
             raise RuntimeError("未获取到续期码")
@@ -1012,7 +1004,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (最终稳定版)", flush=True)
+    print("   HAX 自动续期 (多账号独立 Bot 轮询版)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
