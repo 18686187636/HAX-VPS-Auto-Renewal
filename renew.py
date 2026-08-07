@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (增强弹窗清理版)
+HAX VPS Auto-Renewal (增强弹窗清理 + 提交前截图)
 """
 import os
 import sys
@@ -29,12 +29,12 @@ except ImportError:
 # ===================== 环境变量 =====================
 ACCOUNTS_JSON = os.getenv("ACCOUNTS_JSON", "[]")
 ACCOUNTS = json.loads(ACCOUNTS_JSON)
-HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
+HEADLESS = os.getenv("HEADLESS", "true").lower() == "true")
 PROXY_ADDR = os.getenv("PROXY_SERVER", "socks5://127.0.0.1:1080")
 CODE_FILE = "renewal_code.txt"
 TG_RENEWAL_PATTERN = re.compile(r'[A-Za-z0-9+/=]{32,}')
 DEBUG = os.getenv("DEBUG", "true").lower() == "true"
-SEND_SCREENSHOTS = os.getenv("SEND_SCREENSHOTS", "true").lower() == "true"
+SEND_SCREENSHOTS = os.getenv("SEND_SCREENSHOTS", "true").lower() == "true"   # 已修复括号
 
 def debug_print(*args, **kwargs):
     if DEBUG:
@@ -672,7 +672,6 @@ def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, 
 # ===================== 增强版广告关闭（含 JS 移除） =====================
 def close_ads(page):
     """按照本地脚本方式关闭广告，并额外用 JS 移除遮挡元素"""
-    # 本地脚本方式（等待、ESC、关键词点击）
     print("  [AD] 等待并关闭广告...")
     page.wait(3)
     try:
@@ -694,7 +693,6 @@ def close_ads(page):
     # 额外通过 JS 移除常见弹窗元素
     js_remove = """
     (function() {
-        // 移除常见弹窗 overlay
         var selectors = [
             '.overlay', '.modal-backdrop', '.popup-overlay', 
             '[class*="overlay"]', '[class*="modal"]', '[class*="popup"]',
@@ -703,7 +701,6 @@ def close_ads(page):
         selectors.forEach(function(sel) {
             document.querySelectorAll(sel).forEach(function(el) { el.remove(); });
         });
-        // 移除固定定位且 z-index 很高的元素
         var all = document.querySelectorAll('*');
         all.forEach(function(el) {
             var style = getComputedStyle(el);
@@ -979,10 +976,19 @@ def renew_account(account):
             page.wait(60)
             recaptcha_solved = is_recaptcha_solved(page)
 
-        # ---------- 提交 ----------
+        # ---------- 提交续期（增加提交前截图） ----------
         debug_print("提交续期")
         print("  [SUBMIT] 提交续期...", flush=True)
-        close_ads(page)
+        close_ads(page)  # 先关闭可能遮挡的广告
+
+        # 🆕 在点击提交按钮之前截图，记录表单状态
+        try:
+            take_screenshot(page, f"before_submit_{phone}.png", bot_token, chat_id,
+                            f"📝 提交前截图 - {phone} (已填好续期码和reCAPTCHA)")
+        except Exception as e:
+            print(f"  [截图] 提交前截图失败: {e}", flush=True)
+
+        # 查找提交按钮
         submit_btn = None
         for selector in [
             "css:button[name=submit_button]",
@@ -1089,7 +1095,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (增强弹窗清理版)", flush=True)
+    print("   HAX 自动续期 (增强弹窗清理 + 提交前截图)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
