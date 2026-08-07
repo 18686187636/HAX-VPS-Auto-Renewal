@@ -3,7 +3,6 @@
 在本地运行一次，生成 Telegram 会话字符串，存入 GitHub Secrets
 """
 from telethon import TelegramClient
-import os
 import sys
 
 print("=" * 60)
@@ -25,30 +24,21 @@ if not api_hash:
 
 client = TelegramClient('session', api_id, api_hash)
 
-
 async def main():
     print("\n📱 正在连接 Telegram...")
     await client.start()
     print("✅ 登录成功！")
-
-    # 获取当前用户信息
     me = await client.get_me()
     print(f"\n👤 用户: {me.first_name} (@{me.username or '无用户名'})")
-    print(f"   ID: {me.id}")
-
-    # 保存 session 字符串
     session_str = client.session.save()
     with open('session_string.txt', 'w') as f:
         f.write(session_str)
-
     print("\n" + "=" * 60)
     print("✅ 生成的 Session 字符串（请保存到 GitHub Secrets）")
     print("=" * 60)
     print(session_str)
     print("=" * 60)
     print("\n已同时保存到文件: session_string.txt")
-    print("请将此字符串存入 GitHub Secret: SESSION_STRING")
-
 
 with client:
     client.loop.run_until_complete(main())
