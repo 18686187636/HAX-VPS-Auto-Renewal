@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (增强弹窗关闭版)
-- 准确登录检测（Logout/Login 按钮）
-- Cookie 登录失败后自动 OAuth
-- 自动处理 Consent 弹窗
-- 强力广告弹窗关闭（多种方式）
-- 等待续期码期间每分钟截图发送
-- 算术验证码 + 音频 reCAPTCHA 识别
+HAX VPS Auto-Renewal (最终修复版 - 弹窗关闭 JS 错误修正)
 """
 import os
 import sys
@@ -40,7 +34,7 @@ PROXY_ADDR = os.getenv("PROXY_SERVER", "socks5://127.0.0.1:1080")
 CODE_FILE = "renewal_code.txt"
 TG_RENEWAL_PATTERN = re.compile(r'[A-Za-z0-9+/=]{32,}')
 DEBUG = os.getenv("DEBUG", "true").lower() == "true"
-SEND_SCREENSHOTS = os.getenv("SEND_SCREENSHOTS", "true").lower() == "true"
+SEND_SCREENSHOTS = os.getenv("SEND_SCREENSHOTS", "true").lower() == "true")
 
 def debug_print(*args, **kwargs):
     if DEBUG:
@@ -675,9 +669,9 @@ def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, 
             print(f"  [CODE] 等待中... ({elapsed//60} 分钟)", flush=True)
     return "", None
 
-# ===================== 强力弹窗关闭函数 =====================
+# ===================== 弹窗关闭函数（修复 JS 重复声明） =====================
 def close_all_popups(page):
-    """尝试多种方式关闭页面的广告/弹窗"""
+    """尝试多种方式关闭页面的广告/弹窗（修复 JS 重复声明错误）"""
     try:
         # 1. 按 ESC 键
         try:
@@ -706,27 +700,32 @@ def close_all_popups(page):
             except:
                 continue
 
-        # 3. 尝试点击任何看起来像关闭的按钮（通过 JS）
+        # 3. 尝试点击任何看起来像关闭的按钮（通过 JS）- 修复重复声明错误
         page.run_js("""
-            const closeBtns = document.querySelectorAll('button, a, span, div');
-            for (let el of closeBtns) {
-                const txt = el.textContent.toLowerCase();
-                if (txt.includes('close') || txt.includes('×') || txt.includes('关闭') || 
-                    (el.className && el.className.includes('close')) ||
-                    (el.id && el.id.includes('close'))) {
-                    if (el.offsetParent !== null) {
-                        el.click();
-                        break;
+            (function() {
+                var closeBtns = document.querySelectorAll('button, a, span, div');
+                for (var i = 0; i < closeBtns.length; i++) {
+                    var el = closeBtns[i];
+                    var txt = (el.textContent || '').toLowerCase();
+                    if (txt.includes('close') || txt.includes('×') || txt.includes('关闭') || 
+                        (el.className && el.className.includes('close')) ||
+                        (el.id && el.id.includes('close'))) {
+                        if (el.offsetParent !== null) {
+                            el.click();
+                            break;
+                        }
                     }
                 }
-            }
+            })();
         """)
         time.sleep(0.5)
 
         # 4. 移除所有 overlay（最后手段）
         page.run_js("""
-            const overlays = document.querySelectorAll('.overlay, .modal-backdrop, .popup-overlay, [class*="overlay"]');
-            overlays.forEach(el => el.remove());
+            (function() {
+                var overlays = document.querySelectorAll('.overlay, .modal-backdrop, .popup-overlay, [class*="overlay"]');
+                overlays.forEach(function(el) { el.remove(); });
+            })();
         """)
         time.sleep(0.5)
 
@@ -865,7 +864,6 @@ def renew_account(account):
         debug_print("处理广告")
         print("  [AD] 等待并关闭广告...", flush=True)
         page.wait(3)
-        # 再次关闭弹窗
         close_all_popups(page)
         page.wait(2)
 
@@ -1020,7 +1018,6 @@ def renew_account(account):
         # ---------- 提交 ----------
         debug_print("提交续期")
         print("  [SUBMIT] 提交续期...", flush=True)
-        # 关闭弹窗后再找按钮
         close_all_popups(page)
         submit_btn = None
         for selector in [
@@ -1050,7 +1047,10 @@ def renew_account(account):
 
         # ---------- 检查结果 ----------
         debug_print("检查续期结果")
-        close_all_popups(page)
+        # 先彻底移除遮挡元素
+        for _ in range(3):
+            close_all_popups(page)
+            time.sleep(1)
         page.wait.doc_loaded(timeout=15)
         page.wait(3)
         result_text = page.run_js("document.body.innerText") or ""
@@ -1118,7 +1118,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (增强弹窗关闭版)", flush=True)
+    print("   HAX 自动续期 (最终修复版)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
