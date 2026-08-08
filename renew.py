@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (多账号 + Telethon 自动确认 - 增强 token 提取)
+HAX VPS Auto-Renewal (多账号 + Telethon 自动确认 - 终极增强版)
 """
 import os
 import sys
@@ -28,6 +28,7 @@ try:
 except ImportError:
     TELEGRAM_AVAILABLE = False
 
+# 语音识别相关
 try:
     import speech_recognition as sr
     from pydub import AudioSegment
@@ -253,65 +254,80 @@ def accept_login_token_sync(token, session_string):
         print(f"  [Telethon] 执行异常: {e}", flush=True)
         return False
 
-# ===================== 增强的 Login Token 提取 =====================
-def extract_login_token(oauth_page):
+# ===================== 增强的 Login Token 提取（含轮询） =====================
+def extract_login_token(oauth_page, max_wait=10):
     """
-    从 OAuth 页面中提取 login token，尝试多种方法。
+    从 OAuth 页面中提取 login token，尝试多种方法，最多等待 max_wait 秒。
     """
     debug_print("尝试提取 login token...")
-    
-    # 方法1: 从 window 对象
-    token = oauth_page.run_js("return window.tgLogin?.token || window._tgLoginToken || '';")
-    if token:
-        debug_print(f"从 window 提取到 token: {token[:10]}...")
-        return token
-    
-    # 方法2: 从 iframe 的 src 参数（如果有嵌套 iframe）
-    try:
-        src = oauth_page.run_js("return document.querySelector('iframe')?.src || '';")
-        if src:
-            match = re.search(r'[?&]token=([^&]+)', src)
-            if match:
-                token = match.group(1)
-                debug_print(f"从 iframe src 提取到 token: {token[:10]}...")
-                return token
-    except Exception:
-        pass
-    
-    # 方法3: 从页面 HTML 中搜索 token 字符串
-    try:
-        html_content = oauth_page.run_js("return document.documentElement.outerHTML;")
-        if html_content:
-            # 常见的 token 格式: "token":"xxx" 或 'token':'xxx' 或 token=xxx
-            patterns = [
-                r'"token"\s*:\s*"([^"]+)"',
-                r"'token'\s*:\s*'([^']+)'",
-                r'token\s*=\s*"([^"]+)"',
-                r'token\s*=\s*\'([^\']+)\'',
-                r'token\s*=\s*([^\s&]+)',
-            ]
-            for pat in patterns:
-                match = re.search(pat, html_content)
+    start = time.time()
+    token = None
+
+    while time.time() - start < max_wait:
+        # 方法1: 从 window 对象（最常见）
+        token = oauth_page.run_js("return window.tgLogin?.token || window._tgLoginToken || '';")
+        if token:
+            debug_print(f"从 window 提取到 token: {token[:10]}...")
+            return token
+
+        # 方法2: 从 iframe 的 src 参数
+        try:
+            src = oauth_page.run_js("return document.querySelector('iframe')?.src || '';")
+            if src:
+                match = re.search(r'[?&]token=([^&]+)', src)
                 if match:
                     token = match.group(1)
-                    debug_print(f"从 HTML 提取到 token: {token[:10]}...")
+                    debug_print(f"从 iframe src 提取到 token: {token[:10]}...")
                     return token
-    except Exception:
-        pass
-    
-    # 方法4: 尝试从页面中的 script 标签中提取 (更通用)
-    try:
-        scripts = oauth_page.run_js("return Array.from(document.querySelectorAll('script')).map(s => s.innerText).join('\\n');")
-        if scripts:
-            # 搜索 tgLogin 或类似变量
-            match = re.search(r'tgLogin\s*=\s*\{[^}]*token\s*:\s*["\']([^"\']+)', scripts)
-            if match:
-                token = match.group(1)
-                debug_print(f"从 script 提取到 token: {token[:10]}...")
+        except:
+            pass
+
+        # 方法3: 从页面 HTML 中搜索
+        try:
+            html_content = oauth_page.run_js("return document.documentElement.outerHTML;")
+            if html_content:
+                patterns = [
+                    r'"token"\s*:\s*"([^"]+)"',
+                    r"'token'\s*:\s*'([^']+)'",
+                    r'token\s*=\s*"([^"]+)"',
+                    r'token\s*=\s*\'([^\']+)\'',
+                    r'token\s*=\s*([^\s&]+)',
+                ]
+                for pat in patterns:
+                    match = re.search(pat, html_content)
+                    if match:
+                        token = match.group(1)
+                        debug_print(f"从 HTML 提取到 token: {token[:10]}...")
+                        return token
+        except:
+            pass
+
+        # 方法4: 从 script 标签中搜索
+        try:
+            scripts = oauth_page.run_js("return Array.from(document.querySelectorAll('script')).map(s => s.innerText).join('\\n');")
+            if scripts:
+                # 搜索 tgLogin 或类似变量
+                match = re.search(r'tgLogin\s*=\s*\{[^}]*token\s*:\s*["\']([^"\']+)', scripts)
+                if match:
+                    token = match.group(1)
+                    debug_print(f"从 script 提取到 token: {token[:10]}...")
+                    return token
+        except:
+            pass
+
+        # 方法5: 从 localStorage 或 sessionStorage 中查找
+        try:
+            storage = oauth_page.run_js("return localStorage.getItem('tgLoginToken') || sessionStorage.getItem('tgLoginToken') || '';")
+            if storage:
+                token = storage
+                debug_print(f"从 storage 提取到 token: {token[:10]}...")
                 return token
-    except Exception:
-        pass
-    
+        except:
+            pass
+
+        # 等待 0.5 秒后重试
+        time.sleep(0.5)
+
     debug_print("所有 token 提取方法均失败")
     return None
 
@@ -375,10 +391,10 @@ def login_with_telegram_original(page, phone, bot_token=None, chat_id=None, sess
                 oauth_page.run_js("document.querySelector('form')?.submit();")
                 print("  [LOGIN] 使用 JS 提交", flush=True)
 
-            time.sleep(3)
+            # 等待页面加载，然后提取 token（轮询最多10秒）
+            time.sleep(2)
+            login_token = extract_login_token(oauth_page, max_wait=10)
 
-            # ----- 增强的 token 提取 -----
-            login_token = extract_login_token(oauth_page)
             if login_token and session_string:
                 print(f"  [LOGIN] 提取到 login token: {login_token[:10]}...")
                 if TELEGRAM_AVAILABLE and API_ID and API_HASH:
@@ -448,34 +464,838 @@ def set_session_cookie(page, session_token):
         debug_print(f"JS 注入失败: {e}")
     return False
 
-# ===================== reCAPTCHA 音频求解（完整，省略以节省篇幅，但实际应完整包含） =====================
-# ...（此处应包含 solve_recaptcha、算术验证码等函数，与之前相同，此处省略以聚焦于问题，实际使用需补全）...
+# ===================== reCAPTCHA 音频求解（完整实现） =====================
+def find_frame(page, keyword):
+    try:
+        frames = page.get_frames()
+        for frame in frames:
+            frame_url = (frame.url or "").lower()
+            if "recaptcha" in frame_url and keyword in frame_url:
+                return frame
+    except Exception:
+        pass
+    return None
 
-# 为了完整性，快速列出剩余函数（实际代码中需完整包含）：
-def find_frame(page, keyword): pass
-def is_recaptcha_solved(page): pass
-def click_recaptcha_checkbox(page): pass
-def switch_to_audio(page): pass
-def get_audio_url(page): pass
-def download_audio(url): pass
-def recognize_audio(mp3_path): pass
-def fill_and_verify(page, text): pass
-def solve_recaptcha(page, timeout=60): pass
-def solve_arithmetic_captcha(page): pass
-def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, timeout=1800, poll_interval=10): pass
-def close_ads(page): pass
-def handle_consent(page): pass
+def is_recaptcha_solved(page):
+    try:
+        for frame in page.get_frames():
+            token = frame.run_js(
+                "(() => { try { const el = document.querySelector('textarea[name=g-recaptcha-response]'); return el ? el.value : ''; } catch(e) { return ''; } })()"
+            )
+            if token and len(token) > 30:
+                return True
+    except Exception:
+        pass
+    anchor = find_frame(page, "anchor")
+    if anchor:
+        try:
+            checked = anchor.run_js(
+                "(() => { try { const el = document.querySelector('#recaptcha-anchor'); return el ? (el.getAttribute('aria-checked') === 'true') : false; } catch(e) { return false; } })()"
+            )
+            if checked:
+                return True
+        except Exception:
+            pass
+    return False
+
+def click_recaptcha_checkbox(page):
+    anchor = find_frame(page, "anchor")
+    if not anchor:
+        for _ in range(120):
+            anchor = find_frame(page, "anchor")
+            if anchor:
+                break
+            time.sleep(1)
+        if not anchor:
+            raise RuntimeError("reCAPTCHA anchor iframe not found")
+    checkbox = anchor.ele("#recaptcha-anchor", timeout=3)
+    if not checkbox:
+        raise RuntimeError("reCAPTCHA checkbox not found")
+    page.actions.move_to(checkbox, duration=random.uniform(0.4, 1.0))
+    time.sleep(random.uniform(0.2, 0.5))
+    try:
+        checkbox.click()
+    except Exception:
+        checkbox.click(by_js=True)
+    time.sleep(3)
+
+def switch_to_audio(page):
+    bframe = find_frame(page, "bframe")
+    if not bframe:
+        return False
+    try:
+        input_box = bframe.ele("#audio-response", timeout=1)
+        if input_box and input_box.states.is_displayed:
+            return True
+    except Exception:
+        pass
+    for _ in range(3):
+        try:
+            audio_btn = bframe.ele("#recaptcha-audio-button", timeout=3)
+            if audio_btn:
+                try:
+                    audio_btn.click()
+                except Exception:
+                    audio_btn.click(by_js=True)
+                time.sleep(3)
+                input_box = bframe.ele("#audio-response", timeout=1)
+                if input_box and input_box.states.is_displayed:
+                    return True
+        except Exception:
+            pass
+    try:
+        bframe.run_js(
+            "(() => { const btn = document.querySelector('#recaptcha-audio-button'); if (btn) btn.click(); })()"
+        )
+        time.sleep(3)
+        input_box = bframe.ele("#audio-response", timeout=1)
+        if input_box and input_box.states.is_displayed:
+            return True
+    except Exception:
+        pass
+    return False
+
+def get_audio_url(page):
+    bframe = find_frame(page, "bframe")
+    if not bframe:
+        return None
+    for _ in range(10):
+        try:
+            link = bframe.ele(".rc-audiochallenge-tdownload-link", timeout=1)
+            if link:
+                href = link.attr("href")
+                if href and len(href) > 10:
+                    return html.unescape(href)
+            link = bframe.ele(".rc-audiochallenge-ndownload-link", timeout=1)
+            if link:
+                href = link.attr("href")
+                if href and len(href) > 10:
+                    return html.unescape(href)
+            audio = bframe.ele("#audio-source", timeout=1)
+            if audio:
+                src = audio.attr("src")
+                if src and len(src) > 10:
+                    return html.unescape(src)
+        except Exception:
+            pass
+        time.sleep(1)
+    return None
+
+def download_audio(url):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://www.google.com/",
+    }
+    urls = [url]
+    if "recaptcha.net" in url:
+        urls.append(url.replace("recaptcha.net", "www.google.com"))
+    elif "google.com" in url:
+        urls.append(url.replace("www.google.com", "recaptcha.net"))
+    for audio_url in urls:
+        try:
+            r = req_lib.get(audio_url, headers=headers, timeout=30)
+            r.raise_for_status()
+            if len(r.content) < 1000:
+                continue
+            path = tempfile.mktemp(suffix=".mp3")
+            with open(path, "wb") as f:
+                f.write(r.content)
+            return path
+        except Exception:
+            pass
+    return None
+
+def recognize_audio(mp3_path):
+    if sr and AudioSegment:
+        try:
+            wav_path = mp3_path.replace(".mp3", ".wav")
+            AudioSegment.from_mp3(mp3_path).export(wav_path, format="wav")
+            recognizer = sr.Recognizer()
+            with sr.AudioFile(wav_path) as source:
+                audio_data = recognizer.record(source)
+                text = recognizer.recognize_google(audio_data)
+            try:
+                os.remove(wav_path)
+            except Exception:
+                pass
+            if text:
+                print(f"  [STT] Google 识别: {text}", flush=True)
+                return text
+        except Exception as e:
+            print(f"  [STT] Google 失败: {e}", flush=True)
+    audio_api_url = os.getenv("AUDIO_API_URL")
+    if audio_api_url:
+        try:
+            with open(mp3_path, "rb") as f:
+                files = {"audio": f}
+                resp = req_lib.post(audio_api_url, files=files, timeout=30)
+                resp.raise_for_status()
+                result = resp.json()
+                text = result.get("text") or result.get("result") or result.get("data")
+                if text:
+                    print(f"  [API] 备用识别: {text}", flush=True)
+                    return text
+        except Exception as e:
+            print(f"  [API] 备用识别失败: {e}", flush=True)
+    return None
+
+def fill_and_verify(page, text):
+    bframe = find_frame(page, "bframe")
+    if not bframe:
+        return False
+    try:
+        input_box = bframe.ele("#audio-response", timeout=2)
+        if not input_box:
+            return False
+        input_box.click()
+        input_box.clear()
+        input_box.input(text)
+    except Exception:
+        return False
+    time.sleep(random.uniform(0.5, 1.5))
+    try:
+        verify_btn = bframe.ele("#recaptcha-verify-button", timeout=2)
+        if verify_btn:
+            try:
+                verify_btn.click()
+            except Exception:
+                verify_btn.click(by_js=True)
+    except Exception:
+        pass
+    return True
+
+def solve_recaptcha(page, timeout=60):
+    debug_print("开始 solve_recaptcha")
+    start_time = time.time()
+    for _ in range(int(timeout / 2)):
+        if find_frame(page, "anchor"):
+            break
+        time.sleep(2)
+    while time.time() - start_time < timeout:
+        if is_recaptcha_solved(page):
+            print("  [reCAPTCHA] 已通过！", flush=True)
+            return True
+        try:
+            click_recaptcha_checkbox(page)
+        except Exception as e:
+            print(f"  [reCAPTCHA] 点击复选框失败: {e}", flush=True)
+            time.sleep(2)
+            continue
+        time.sleep(2)
+        if is_recaptcha_solved(page):
+            print("  [reCAPTCHA] 点击后直接通过！", flush=True)
+            return True
+        if not switch_to_audio(page):
+            time.sleep(2)
+            if not switch_to_audio(page):
+                print("  [reCAPTCHA] 无法切换到音频模式", flush=True)
+                time.sleep(random.uniform(2, 4))
+                continue
+        time.sleep(random.uniform(2, 4))
+        audio_url = get_audio_url(page)
+        if not audio_url:
+            print("  [reCAPTCHA] 未找到音频 URL，重试...", flush=True)
+            time.sleep(random.uniform(3, 6))
+            continue
+        print(f"  [reCAPTCHA] 音频 URL: {audio_url[:80]}...", flush=True)
+        mp3_path = download_audio(audio_url)
+        if not mp3_path:
+            print("  [reCAPTCHA] 音频下载失败，重试...", flush=True)
+            time.sleep(random.uniform(3, 6))
+            continue
+        print(f"  [reCAPTCHA] 音频已下载: {os.path.basename(mp3_path)}", flush=True)
+        text = recognize_audio(mp3_path)
+        try:
+            os.remove(mp3_path)
+        except Exception:
+            pass
+        if not text:
+            print("  [reCAPTCHA] 无法识别语音，重试...", flush=True)
+            time.sleep(random.uniform(3, 6))
+            continue
+        print(f"  [reCAPTCHA] 识别结果: [{text}]", flush=True)
+        fill_and_verify(page, text)
+        time.sleep(5)
+        if is_recaptcha_solved(page):
+            print("  [reCAPTCHA] 语音验证通过！", flush=True)
+            return True
+        else:
+            print("  [reCAPTCHA] 验证未通过，重新获取音频...", flush=True)
+            time.sleep(random.uniform(2, 4))
+    print(f"  [reCAPTCHA] {timeout} 秒超时", flush=True)
+    return False
+
+# ===================== 算术验证码 =====================
+def solve_arithmetic_captcha(page):
+    debug_print("开始 solve_arithmetic_captcha")
+    print("  [CAPTCHA] 识别算式验证码...", flush=True)
+    page.wait(3)
+    img_urls_str = page.run_js("""(() => {
+        const all = document.querySelectorAll("img");
+        const urls = [];
+        for (let i = 0; i < all.length; i++) {
+            const s = all[i].src || '';
+            if (s && !s.startsWith('data:')) {
+                urls.push({src: s, w: all[i].naturalWidth, h: all[i].naturalHeight});
+            }
+        }
+        return JSON.stringify(urls);
+    })()""")
+    try:
+        all_imgs = json.loads(img_urls_str)
+    except Exception:
+        all_imgs = []
+    print(f"  [CAPTCHA] 页面共 {len(all_imgs)} 张图片", flush=True)
+    captcha_urls = []
+    for img in all_imgs:
+        s = img.get('src', '')
+        w, h = img.get('w', 0), img.get('h', 0)
+        if 'hax.co.id/img/temp/' in s and 15 <= w <= 50 and 15 <= h <= 50:
+            captcha_urls.append(s)
+    print(f"  [CAPTCHA] 找到 {len(captcha_urls)} 张验证码图片", flush=True)
+    if len(captcha_urls) < 2:
+        for img in all_imgs:
+            s = img.get('src', '')
+            w, h = img.get('w', 0), img.get('h', 0)
+            if s and not s.startswith('data:') and 'hax.co.id' in s:
+                if w <= 50 and h <= 50:
+                    captcha_urls.append(s)
+    if len(captcha_urls) < 2:
+        print(f"  [CAPTCHA] 图片不足，使用所有非logo图片", flush=True)
+        for img in all_imgs:
+            s = img.get('src', '')
+            if s and not s.startswith('data:') and 'logo' not in s.lower():
+                captcha_urls.append(s)
+        captcha_urls = captcha_urls[:2]
+    print(f"  [CAPTCHA] URL: {[u.split('/')[-1][:30] for u in captcha_urls]}", flush=True)
+    digits = []
+    for url in captcha_urls[:2]:
+        after_dash = url.rsplit('-', 1)[-1] if '-' in url else ''
+        first_char = after_dash[0] if after_dash else ''
+        if first_char.isdigit():
+            digit = int(first_char)
+            digits.append(digit)
+            print(f"  [CAPTCHA] URL提取数字: {digit}", flush=True)
+        else:
+            print(f"  [CAPTCHA] URL提取失败，使用默认值0", flush=True)
+            digits.append(0)
+    if len(digits) < 2:
+        print(f"  [CAPTCHA] 识别失败: {digits}", flush=True)
+        return None
+    op_text = page.run_js("""(() => {
+        const groups = document.querySelectorAll('.form-group.row');
+        for (let g = 0; g < groups.length; g++) {
+            const imgs = groups[g].querySelectorAll('img');
+            if (imgs.length >= 2) {
+                const walker = document.createTreeWalker(groups[g], NodeFilter.SHOW_TEXT, null, false);
+                while (walker.nextNode()) {
+                    const txt = walker.currentNode.textContent.trim();
+                    if (txt.length <= 3 && /[+\\-×÷*/xX]/.test(txt)) return txt;
+                }
+                const els = groups[g].querySelectorAll('*');
+                for (let e = 0; e < els.length; e++) {
+                    const txt = els[e].textContent.trim();
+                    if (txt.length <= 3 && /[+\\-×÷*/xX]/.test(txt) && els[e].querySelectorAll('img').length === 0) return txt;
+                }
+                return '';
+            }
+        }
+        return '';
+    })()""")
+    print(f"  [CAPTCHA] 运算符: [{op_text}]", flush=True)
+    op = "+"
+    if "×" in op_text or "*" in op_text or "x" in op_text or "X" in op_text:
+        op = "*"
+    elif "-" in op_text or "−" in op_text or "－" in op_text:
+        op = "-"
+    result = eval(f"{digits[0]} {op} {digits[1]}")
+    op_symbol = "×" if op == "*" else ("−" if op == "-" else "+")
+    print(f"  [CAPTCHA] 算式: {digits[0]} {op_symbol} {digits[1]} = {result}", flush=True)
+    return result
+
+# ===================== 续期码获取（含文件轮询） =====================
+def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, timeout=1800, poll_interval=10):
+    debug_print(f"进入 get_renewal_code_from_telegram，超时 {timeout}s")
+    offsets = {}
+    for bt in bot_tokens:
+        try:
+            proxies = get_proxies()
+            url = f"https://api.telegram.org/bot{bt['token']}/getUpdates"
+            resp = req_lib.get(url, timeout=10, proxies=proxies) if proxies else req_lib.get(url, timeout=10)
+            data = resp.json()
+            if data.get("ok") and data.get("result"):
+                offsets[bt['token']] = max(u["update_id"] for u in data["result"]) + 1
+            else:
+                offsets[bt['token']] = 0
+        except Exception:
+            offsets[bt['token']] = 0
+    elapsed = 0
+    code = ""
+    last_screenshot_minute = -1
+    while elapsed < timeout:
+        # 每轮先检查文件
+        file_code = read_code_from_file()
+        if file_code:
+            print(f"  [CODE] 从文件读取到续期码: {file_code[:20]}***，直接使用", flush=True)
+            return file_code, "file"
+
+        current_minute = elapsed // 60
+        if current_minute > last_screenshot_minute and current_minute > 0:
+            last_screenshot_minute = current_minute
+            try:
+                png_path = f"waiting_{phone}_{current_minute}m.png"
+                take_screenshot(page, png_path, bot_token, chat_id,
+                                f"⏳ 等待续期码 (已等待 {current_minute} 分钟) - {phone}")
+            except Exception as e:
+                print(f"  [截图] 等待截图失败: {e}", flush=True)
+
+        # 轮询 Telegram
+        for bt in bot_tokens:
+            offset = offsets.get(bt['token'], 0)
+            try:
+                proxies = get_proxies()
+                url = f"https://api.telegram.org/bot{bt['token']}/getUpdates?offset={offset}&timeout=5"
+                resp = (req_lib.get(url, timeout=10, proxies=proxies) if proxies else req_lib.get(url, timeout=10))
+                data = resp.json()
+                if data.get("ok"):
+                    for update in data.get("result", []):
+                        offsets[bt['token']] = update["update_id"] + 1
+                        msg = update.get("message", {})
+                        text = msg.get("text", "") or msg.get("caption", "")
+                        if text:
+                            match = TG_RENEWAL_PATTERN.search(text)
+                            if match:
+                                code = match.group(0)
+                                write_code_to_file(code)
+                                return code, bt.get("label", bt['token'][-6:])
+            except Exception:
+                pass
+        time.sleep(poll_interval)
+        elapsed += poll_interval
+        if elapsed % 60 < poll_interval:
+            print(f"  [CODE] 等待中... ({elapsed//60} 分钟)", flush=True)
+    return "", None
+
+# ===================== 增强版广告关闭（含 JS 移除） =====================
+def close_ads(page):
+    print("  [AD] 等待并关闭广告...")
+    page.wait(3)
+    try:
+        page.actions.press(Keys.ESCAPE).perform()
+        page.wait(1)
+    except Exception:
+        pass
+    for keyword in ["Close", "close", "×", "关闭"]:
+        try:
+            el = page.ele(f'xpath://*[contains(text(), "{keyword}")]')
+            if el and el.is_displayed:
+                el.click_self()
+                page.wait(1)
+                break
+        except Exception:
+            pass
+    page.wait(3)
+    
+    js_remove = """
+    (function() {
+        var selectors = [
+            '.overlay', '.modal-backdrop', '.popup-overlay', 
+            '[class*="overlay"]', '[class*="modal"]', '[class*="popup"]',
+            '.ad-container', '.ad-wrapper', '.banner-ad'
+        ];
+        selectors.forEach(function(sel) {
+            document.querySelectorAll(sel).forEach(function(el) { el.remove(); });
+        });
+        var all = document.querySelectorAll('*');
+        all.forEach(function(el) {
+            var style = getComputedStyle(el);
+            if (style.position === 'fixed' && parseInt(style.zIndex) > 999) {
+                el.remove();
+            }
+        });
+    })();
+    """
+    try:
+        page.run_js(js_remove)
+        time.sleep(1)
+    except Exception as e:
+        debug_print(f"JS移除弹窗失败: {e}")
+
+# ===================== 处理 Consent 弹窗 =====================
+def handle_consent(page):
+    try:
+        consent_btn = None
+        keywords = ["Consent", "Accept", "Agree", "Got it", "OK", "Allow"]
+        for kw in keywords:
+            try:
+                btn = page.ele(f"xpath://*[contains(text(), '{kw}')]", timeout=2)
+                if btn and btn.is_displayed:
+                    consent_btn = btn
+                    break
+            except:
+                continue
+        if consent_btn:
+            consent_btn.click_self()
+            print("  [Consent] 点击 Consent 按钮", flush=True)
+            page.wait(2)
+            return True
+        return False
+    except Exception as e:
+        debug_print(f"处理 Consent 失败: {e}")
+        return False
 
 # ===================== 单账号续期主流程 =====================
 def renew_account(account, session_string=None):
-    # ... 与之前相同，只需确保调用 login_with_telegram_original 时传入 session_string ...
-    # 此处省略重复代码，实际使用时请合并完整版本
-    pass
+    phone = account.get("phone")
+    session_token = account.get("session_token")
+    bot_token = account.get("bot_token")
+    chat_id = account.get("chat_id")
+
+    if not phone:
+        print("  ⚠️ 账号缺少手机号，跳过", flush=True)
+        return False
+
+    print(f"\n{'='*60}\n  续期: {phone}\n{'='*60}", flush=True)
+
+    proxies = get_proxies()
+    if proxies:
+        print(f"🔗 代理地址: {PROXY_ADDR}", flush=True)
+        ok, ip = check_proxy_ip(proxies)
+        if ok:
+            print(f"📍 代理出口 IP: {ip}", flush=True)
+        else:
+            print("⚠️ 代理出口 IP 获取失败，将使用直连", flush=True)
+            proxies = None
+    else:
+        print("🔗 代理不可用，使用直连", flush=True)
+
+    page = None
+    try:
+        debug_print("准备启动浏览器...")
+        launch_args = {"headless": HEADLESS, "window_size": (1366, 768)}
+        if proxies is not None:
+            launch_args["proxy"] = PROXY_ADDR
+        print("  [BROWSER] 正在启动浏览器（此步骤可能较慢）...", flush=True)
+        page = launch(**launch_args)
+        debug_print("浏览器启动成功，开始访问登录页")
+        page.get("https://hax.co.id/login")
+        page.wait.doc_loaded(timeout=20)
+        page.wait(5)
+
+        # ---------- 尝试 Cookie 登录 ----------
+        login_success = False
+        if session_token:
+            debug_print("尝试 Cookie 登录")
+            print("  [LOGIN] 尝试使用 session_token 快速登录...", flush=True)
+            page.get("https://hax.co.id/login")
+            set_session_cookie(page, session_token)
+            debug_print("Cookie 设置完成，跳转 vps-info")
+            page.get("https://hax.co.id/vps-info")
+            page.wait.doc_loaded(timeout=15)
+            page.get("https://hax.co.id/vps-info")  # 强制刷新
+            page.wait.doc_loaded(timeout=10)
+            if is_logged_in(page):
+                print("  ✅ Cookie 登录成功", flush=True)
+                login_success = True
+            else:
+                print("  ⚠️ Cookie 未生效，将执行 OAuth", flush=True)
+                try:
+                    take_screenshot(page, f"cookie_fail_{phone}.png", bot_token, chat_id,
+                                    f"❌ Cookie 登录失败 - {phone}")
+                except:
+                    pass
+
+        if not login_success:
+            debug_print("Cookie 登录失败，执行 OAuth")
+            print("  [LOGIN] 执行 Telegram OAuth 登录...", flush=True)
+            login_success = login_with_telegram_original(page, phone, bot_token, chat_id, session_string)
+            if not login_success:
+                raise RuntimeError("Telegram 登录失败")
+
+        # 再次确认登录
+        if not is_logged_in(page):
+            print("  ⚠️ 登录后未检测到登录状态，重新加载...", flush=True)
+            page.get("https://hax.co.id/vps-info")
+            page.wait.doc_loaded(timeout=15)
+            if is_logged_in(page):
+                print("  ✅ 重新加载后确认登录", flush=True)
+            else:
+                raise RuntimeError("无法确认登录状态")
+
+        print("  ✅ 登录成功，开始续期流程", flush=True)
+
+        # ----- 1. 处理 Consent 和广告 -----
+        handle_consent(page)
+        close_ads(page)
+
+        # 登录成功截图
+        try:
+            take_screenshot(page, f"login_success_{phone}.png", bot_token, chat_id, f"✅ 登录成功 - {phone}")
+        except Exception as e:
+            print(f"  [截图] 登录截图失败: {e}", flush=True)
+
+        # ---------- 导航到续期 ----------
+        debug_print("导航到 VPS 续期")
+        vps_menu = None
+        for _ in range(5):
+            try:
+                vps_menu = page.ele("css:a.nav-link.dropdown-toggle")
+                if vps_menu and vps_menu.is_displayed:
+                    break
+            except Exception:
+                pass
+            page.wait(2)
+        if not vps_menu:
+            raise RuntimeError("未找到 VPS 下拉菜单")
+        vps_menu.click_self()
+        page.wait(2)
+
+        renew_btn = page.ele('css:a.dropdown-item[href="/vps-renew/"]')
+        if not renew_btn:
+            raise RuntimeError("未找到 VPS Renew 按钮")
+        renew_btn.click_self(by_js=True)
+        print("  [NAV] 点击 VPS Renew", flush=True)
+        page.wait(5)
+
+        # ---------- 填写表单 ----------
+        debug_print("填写续期表单")
+        web_input = page.ele("css:#web_address")
+        if web_input:
+            web_input.input("hax.co.id", clear=True)
+            print("  [FORM] 输入域名", flush=True)
+        agreement = page.ele('css:input[name="agreement"][value="yes"]')
+        if agreement and not agreement.is_checked:
+            agreement.click_self(by_js=True)
+            print("  [FORM] 勾选协议", flush=True)
+
+        print("  [CF] 等待 CloudFlare 验证 (60s)...", flush=True)
+        page.wait(60)
+
+        renew_vps_btn = page.ele("css:button[name=submit_button][type=button].btn-primary")
+        if not renew_vps_btn:
+            raise RuntimeError("未找到 Renew VPS 按钮")
+        renew_vps_btn.click_self(by_js=True)
+        print("  [FORM] 点击 Renew VPS", flush=True)
+        page.wait(5)
+
+        # ----- 2. 点击 Renew VPS 后关闭广告 -----
+        close_ads(page)
+
+        try:
+            take_screenshot(page, f"renew_vps_{phone}.png", bot_token, chat_id, f"🔄 已点击 Renew VPS - {phone}")
+        except Exception as e:
+            print(f"  [截图] Renew VPS 截图失败: {e}", flush=True)
+
+        # ---------- 获取续期码（先读文件，若无则轮询） ----------
+        debug_print("开始获取续期码")
+        code = read_code_from_file()
+        if code:
+            print(f"  [CODE] 直接从文件使用续期码: {code[:20]}***", flush=True)
+        else:
+            print("  [CODE] 文件无续期码，开始等待 @HaxTG_bot 发送...", flush=True)
+            all_bots = []
+            seen = set()
+            for acc in ACCOUNTS:
+                t = acc.get("bot_token")
+                if t and t not in seen:
+                    seen.add(t)
+                    all_bots.append({"token": t, "label": f"...{t[-6:]}"})
+            if bot_token and bot_token not in seen:
+                all_bots.insert(0, {"token": bot_token, "label": f"...{bot_token[-6:]}"})
+
+            code, source = get_renewal_code_from_telegram(
+                all_bots, page, phone, bot_token, chat_id,
+                timeout=1800, poll_interval=10
+            )
+            if not code:
+                try:
+                    take_screenshot(page, f"timeout_{phone}.png", bot_token, chat_id,
+                                    f"⏰ 续期码超时 - {phone}\n请检查 HaxTG_bot")
+                except:
+                    pass
+                raise RuntimeError("未获取到续期码")
+
+        # 使用原始 Base64
+        print(f"  [CODE] 使用原始码: {code[:20]}***", flush=True)
+        renewal_code_to_input = code
+
+        # ---------- 进入续期码输入页 ----------
+        debug_print("进入续期码输入页")
+        renew_code_link = None
+        for selector in [
+            'css:a.btn[href="/vps-renew-code"]',
+            "text:INPUT RENEW CODE",
+            "text:Input Renew Code",
+        ]:
+            try:
+                renew_code_link = page.ele(selector)
+                if renew_code_link:
+                    break
+            except Exception:
+                pass
+        if not renew_code_link:
+            raise RuntimeError("未找到 INPUT RENEW CODE 按钮")
+        renew_code_link.click_self(by_js=True)
+        print("  [NAV] 点击 INPUT RENEW CODE", flush=True)
+        page.wait.doc_loaded(timeout=15)
+        page.wait(3)
+
+        close_ads(page)
+
+        # ---------- 算术验证码 ----------
+        captcha_result = solve_arithmetic_captcha(page)
+        if captcha_result is not None:
+            code_input = page.ele("css:#captcha")
+            if code_input:
+                code_input.input(str(captcha_result), clear=True)
+                print(f"  [CAPTCHA] 输入结果: {captcha_result}", flush=True)
+
+        # 填入续期码
+        debug_print("填入续期码")
+        vcode_input = None
+        for selector in ["css:input.form-control:not(#captcha)", "css:input[name=code]", "css:input#code"]:
+            try:
+                vcode_input = page.ele(selector)
+                if vcode_input:
+                    break
+            except Exception:
+                pass
+        if vcode_input:
+            try:
+                page.run_js(
+                    "(() => { const el = document.querySelector('input.form-control:not(#captcha)'); if (el) el.scrollIntoView({behavior: 'instant', block: 'center'}); })()"
+                )
+                page.wait(1)
+            except Exception:
+                pass
+            vcode_input.input(renewal_code_to_input, clear=True)
+            print(f"  [CODE] 输入 renewal code (原始Base64): {renewal_code_to_input[:20]}***", flush=True)
+
+        # ---------- reCAPTCHA ----------
+        debug_print("开始 reCAPTCHA")
+        print("  [reCAPTCHA] 处理音频验证...", flush=True)
+        recaptcha_solved = solve_recaptcha(page, timeout=90)
+        if not recaptcha_solved:
+            print("  [reCAPTCHA] 自动解决失败，等待用户手动处理...", flush=True)
+            print("  [reCAPTCHA] 请在浏览器中手动完成验证（60秒）", flush=True)
+            page.wait(60)
+            recaptcha_solved = is_recaptcha_solved(page)
+
+        # ---------- 提交续期 ----------
+        debug_print("提交续期")
+        print("  [SUBMIT] 提交续期...", flush=True)
+        close_ads(page)
+
+        try:
+            take_screenshot(page, f"before_submit_{phone}.png", bot_token, chat_id,
+                            f"📝 提交前截图 - {phone} (已填好续期码和reCAPTCHA)")
+        except Exception as e:
+            print(f"  [截图] 提交前截图失败: {e}", flush=True)
+
+        submit_btn = None
+        for selector in [
+            "css:button[name=submit_button]",
+            "css:button.btn-primary",
+            "text:Submit",
+            "text:Submit Renew",
+        ]:
+            try:
+                submit_btn = page.ele(selector)
+                if submit_btn:
+                    break
+            except Exception:
+                pass
+        if not submit_btn:
+            print("  [SUBMIT] 未找到提交按钮，列出所有 button...", flush=True)
+            all_btns = page.eles("css:button")
+            for btn in all_btns:
+                print(f"    button: name={btn.attr('name')} class={btn.attr('class')} text={btn.text.strip()[:50]}", flush=True)
+            raise RuntimeError("未找到提交按钮")
+        try:
+            submit_btn.click_self(by_js=True)
+        except Exception:
+            submit_btn.click_self()
+        print("  [SUBMIT] 已点击提交，等待结果...", flush=True)
+        time.sleep(60)
+
+        # ---------- 检查结果 ----------
+        debug_print("检查续期结果")
+        for _ in range(3):
+            close_ads(page)
+            time.sleep(1)
+        page.run_js("""
+            document.querySelectorAll('.overlay, .modal, .popup, [class*="overlay"], [class*="modal"], [class*="popup"]')
+                .forEach(el => el.remove());
+        """)
+        time.sleep(2)
+        page.wait.doc_loaded(timeout=15)
+        page.wait(3)
+        close_ads(page)
+        result_text = page.run_js("document.body.innerText") or ""
+        result_lower = result_text.lower()
+        is_success = False
+        expiry_date = None
+        success_keywords = [
+            "renewed successfully",
+            "renewal successful",
+            "subscription renewed",
+            "subscription successfully",
+            "续期成功",
+            "renewed",
+        ]
+        if any(kw in result_lower for kw in success_keywords):
+            is_success = True
+            print("  [RESULT] 检测到续期成功！", flush=True)
+            for pat in [
+                r"until\s+([A-Za-z]+\s+\d{1,2},?\s*\d{4})",
+                r"[Ee]xpir(?:e|y)[:\s]*(\d{4}-\d{2}-\d{2})",
+                r"[Vv]alid.*[Uu]ntil[:\s]*(\d{4}-\d{2}-\d{2})",
+                r"[到期期][：:]\s*(\d{4}[-/]\d{1,2}[-/]\d{1,2})",
+            ]:
+                m = re.search(pat, result_text)
+                if m:
+                    expiry_date = m.group(1)
+                    print(f"  [RESULT] 到期日: {expiry_date}", flush=True)
+                    break
+
+        try:
+            result_png = f"result_{phone}.png"
+            status = "成功" if is_success else "失败"
+            caption = f"{'✅' if is_success else '❌'} {status} - {phone}\n到期日: {expiry_date or '未知'}"
+            take_screenshot(page, result_png, bot_token, chat_id, caption)
+        except Exception as e:
+            print(f"  [截图] 结果截图失败: {e}", flush=True)
+
+        if is_success:
+            notify_success(phone, expiry_date or "未知日期", bot_token, chat_id)
+            return True
+        else:
+            error_msg = "Captcha 验证失败" if "captcha" in result_lower else "页面未显示明确结果"
+            notify_failed(phone, "结果页", error_msg, bot_token, chat_id)
+            print(f"  [RESULT] 失败: {error_msg}", flush=True)
+            return False
+
+    except Exception as e:
+        print(f"  ❌ 异常: {e}", flush=True)
+        traceback.print_exc()
+        if page:
+            try:
+                take_screenshot(page, f"error_{phone}.png", bot_token, chat_id, f"⚠️ 异常 - {phone}\n{e}")
+            except:
+                pass
+        notify_failed(phone, "执行异常", str(e), bot_token, chat_id)
+        return False
+    finally:
+        if page:
+            try:
+                page.quit()
+            except:
+                pass
 
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (多账号 + Telethon 自动确认 - 增强 token 提取)", flush=True)
+    print("   HAX 自动续期 (多账号 + Telethon 自动确认 - 终极增强版)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
