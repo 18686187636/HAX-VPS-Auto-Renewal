@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (多账号 + Telethon 自动确认 - 终极调试版)
+HAX VPS Auto-Renewal (多账号 + Telethon 自动确认 - 强化环境变量诊断)
 """
 import os
 import sys
@@ -33,7 +33,9 @@ except ImportError:
     sr = None
     AudioSegment = None
 
-# ===================== 环境变量 =====================
+# ===================== 环境变量读取（含诊断） =====================
+print("🔍 [ENV] 开始读取环境变量...", flush=True)
+
 ACCOUNTS_JSON = os.getenv("ACCOUNTS_JSON", "[]")
 ACCOUNTS = json.loads(ACCOUNTS_JSON)
 HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
@@ -43,18 +45,35 @@ TG_RENEWAL_PATTERN = re.compile(r'[A-Za-z0-9+/=]{32,}')
 DEBUG = os.getenv("DEBUG", "true").lower() == "true"
 SEND_SCREENSHOTS = os.getenv("SEND_SCREENSHOTS", "true").lower() == "true"
 
+# 读取三个账号的 Telethon 会话字符串（优先从独立变量读取）
 SESSION_STRINGS = [
     os.getenv("SESSION_STRING_1", ""),
     os.getenv("SESSION_STRING_2", ""),
     os.getenv("SESSION_STRING_3", ""),
 ]
+
+# 如果所有 SESSION_STRING 都为空，尝试从 SESSION_STRING（单个）读取
+if not any(SESSION_STRINGS):
+    fallback = os.getenv("SESSION_STRING", "")
+    if fallback:
+        SESSION_STRINGS = [fallback, "", ""]
+        print("⚠️ [ENV] 使用 SESSION_STRING 作为回退", flush=True)
+
+# 打印诊断信息（强制刷新）
+print(f"[ENV] SESSION_STRING_1: {SESSION_STRINGS[0][:10] if SESSION_STRINGS[0] else '(空)'}", flush=True)
+print(f"[ENV] SESSION_STRING_2: {SESSION_STRINGS[1][:10] if SESSION_STRINGS[1] else '(空)'}", flush=True)
+print(f"[ENV] SESSION_STRING_3: {SESSION_STRINGS[2][:10] if SESSION_STRINGS[2] else '(空)'}", flush=True)
+
+# 如果仍全部为空，打印环境变量中所有 SESSION 相关内容以供排查
+if not any(SESSION_STRINGS):
+    print("⚠️ [ENV] 未找到任何 SESSION_STRING，当前环境变量中 SESSION 相关项：")
+    for key in os.environ.keys():
+        if "SESSION" in key.upper():
+            print(f"   {key} = {os.environ[key][:10]}...")
+    sys.stdout.flush()
+
 API_ID = int(os.getenv("API_ID", 0))
 API_HASH = os.getenv("API_HASH", "")
-
-# 启动诊断
-print("[INIT] SESSION_STRING_1:", SESSION_STRINGS[0][:10] if SESSION_STRINGS[0] else "EMPTY")
-print("[INIT] SESSION_STRING_2:", SESSION_STRINGS[1][:10] if SESSION_STRINGS[1] else "EMPTY")
-print("[INIT] SESSION_STRING_3:", SESSION_STRINGS[2][:10] if SESSION_STRINGS[2] else "EMPTY")
 
 def debug_print(*args, **kwargs):
     if DEBUG:
@@ -270,7 +289,7 @@ def extract_login_token(oauth_page, max_wait=15):
                 if m: return m.group(1)
         except: pass
 
-        # 3. 遍历 window 所有属性，查找 base64 字符串
+        # 3. 遍历 window 所有属性
         token = oauth_page.run_js("""
             (() => {
                 for (let key in window) {
@@ -286,7 +305,7 @@ def extract_login_token(oauth_page, max_wait=15):
         """)
         if token: return token
 
-        # 4. 从 HTML 中搜索
+        # 4. HTML 搜索
         html_content = oauth_page.run_js("return document.documentElement.outerHTML;")
         if html_content:
             for pat in [
@@ -1250,12 +1269,19 @@ def renew_account(account, session_string=None):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (多账号 + Telethon 自动确认 - 终极调试版)", flush=True)
+    print("   HAX 自动续期 (多账号 + Telethon 自动确认 - 强化诊断)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
         sys.exit(1)
     print(f"✅ 加载了 {len(ACCOUNTS)} 个账号", flush=True)
+    # 再次打印会话字符串状态（已经在脚本开头打印过，但再次强调）
+    print(f"[MAIN] SESSION_STRING_1: {SESSION_STRINGS[0][:10] if SESSION_STRINGS[0] else '(空)'}", flush=True)
+    print(f"[MAIN] SESSION_STRING_2: {SESSION_STRINGS[1][:10] if SESSION_STRINGS[1] else '(空)'}", flush=True)
+    print(f"[MAIN] SESSION_STRING_3: {SESSION_STRINGS[2][:10] if SESSION_STRINGS[2] else '(空)'}", flush=True)
+    if not any(SESSION_STRINGS):
+        print("❌ 所有 SESSION_STRING 均为空，请检查 GitHub Secrets 设置！", flush=True)
+        sys.exit(1)
     success = 0
     for idx, acc in enumerate(ACCOUNTS):
         print(f"\n============================== 处理第 {idx+1}/{len(ACCOUNTS)} 个账号 ==============================", flush=True)
