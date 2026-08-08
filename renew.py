@@ -961,8 +961,10 @@ def renew_account(account):
         print("  ***SUBMIT*** 已点击提交，等待结果...", flush=True)
         time.sleep(60)
 
-        # ---------- 检查结果：跳转到 vps-info 并根据 Valid until 判断 ----------
-        debug_print("检查续期结果：跳转到 vps-info 页面")
+        # ============================================================
+        # 修改后的结果检查：先点击广告，等待45秒，再检查 Valid until
+        # ============================================================
+        debug_print("检查续期结果：跳转到 vps-info 页面，点击广告并等待45秒")
         print("  [RESULT] 跳转到 https://hax.co.id/vps-info/ 检查续期结果...", flush=True)
 
         # 1. 导航到 VPS 信息页
@@ -974,14 +976,61 @@ def renew_account(account):
         close_ads(page)
         page.wait(2)
 
-        # 3. 获取页面文本
+        # 3. 点击 "View a short ad" 按钮
+        print("  [AD] 查找并点击 'View a short ad' 按钮...", flush=True)
+        ad_btn = None
+        # 尝试多种选择器
+        for selector in [
+            "text:View a short ad",
+            "text:View Short Ad",
+            "css:button:has-text('View a short ad')",
+            "xpath://*[contains(text(), 'View a short ad')]",
+            "xpath://button[contains(text(), 'View') and contains(text(), 'ad')]",
+        ]:
+            try:
+                ad_btn = page.ele(selector, timeout=3)
+                if ad_btn and ad_btn.is_displayed:
+                    break
+            except Exception:
+                continue
+
+        if ad_btn:
+            try:
+                ad_btn.click_self()
+                print("  [AD] ✅ 已点击 'View a short ad' 按钮，等待45秒广告播放...", flush=True)
+            except Exception as e:
+                print(f"  [AD] ⚠️ 点击广告按钮失败: {e}，尝试 JS 点击", flush=True)
+                try:
+                    page.run_js("document.querySelector('button:has-text(\"View a short ad\")')?.click();")
+                    print("  [AD] ✅ 通过 JS 点击广告按钮", flush=True)
+                except:
+                    print("  [AD] ❌ JS 点击也失败，跳过广告步骤", flush=True)
+        else:
+            print("  [AD] ⚠️ 未找到 'View a short ad' 按钮，跳过广告步骤", flush=True)
+
+        # 4. 等待45秒广告播放
+        print("  [AD] ⏳ 等待45秒广告播放完毕...", flush=True)
+        time.sleep(45)
+
+        # 5. 关闭广告弹窗
+        close_ads(page)
+        page.wait(2)
+
+        # 6. 刷新页面确保显示最新状态
+        print("  [RESULT] 刷新页面获取最新状态...", flush=True)
+        page.get("https://hax.co.id/vps-info")
+        page.wait.doc_loaded(timeout=20)
+        page.wait(5)
+        close_ads(page)
+
+        # 7. 获取页面文本
         result_text = page.run_js("document.body.innerText") or ""
         if not result_text.strip():
             print("  [RESULT] 页面内容为空，等待 5 秒后重试...", flush=True)
             time.sleep(5)
             result_text = page.run_js("document.body.innerText") or ""
 
-        # 4. 提取 Valid until 日期字符串
+        # 8. 提取 Valid until 日期字符串
         expiry_date_str = None
         match = re.search(r'Valid until:\s*([^:\n]+?)(?:\n|$)', result_text, re.IGNORECASE)
         if match:
@@ -990,20 +1039,17 @@ def renew_account(account):
         else:
             print("  [RESULT] 未找到 'Valid until' 字段", flush=True)
 
-        # 5. 解析日期并判断是否在未来
+        # 9. 解析日期并判断是否在未来
         is_success = False
-        expiry_date = None  # 保留用于通知
+        expiry_date = None
         if expiry_date_str:
             parsed_date = None
-            # 尝试使用 dateutil 解析（如果可用）
             if date_parser:
                 try:
                     parsed_date = date_parser.parse(expiry_date_str, fuzzy=True)
                 except Exception as e:
                     debug_print(f"dateutil 解析失败: {e}")
-            # 如果 dateutil 不可用或解析失败，手动尝试常见格式
             if parsed_date is None:
-                # 尝试 "Month Day HH:MM:SS Year GMT" 格式
                 months = {
                     'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
                     'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
@@ -1018,14 +1064,12 @@ def renew_account(account):
                         hour, minute, second = map(int, time_str.split(':'))
                         parsed_date = datetime(year, month, day, hour, minute, second)
                 else:
-                    # 尝试 "YYYY-MM-DD" 或 "YYYY/MM/DD"
                     m = re.search(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', expiry_date_str)
                     if m:
                         year, month, day = map(int, m.groups())
                         parsed_date = datetime(year, month, day)
 
             if parsed_date:
-                # 确保有时区信息，假定为 UTC
                 if parsed_date.tzinfo is None:
                     parsed_date = parsed_date.replace(tzinfo=timezone.utc)
                 now_utc = datetime.now(timezone.utc)
@@ -1041,7 +1085,7 @@ def renew_account(account):
         if not is_success:
             print("  [RESULT] ❌ 续期失败（未检测到有效的未来到期日）", flush=True)
 
-        # 6. 截图并发送通知
+        # 10. 截图并发送通知
         try:
             result_png = f"result_{phone}.png"
             status = "成功" if is_success else "失败"
