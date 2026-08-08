@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (最终修正版 - 完善重试流程)
+HAX VPS Auto-Renewal (最终修正版 - 增强截图与重试)
 """
 import os
 import sys
@@ -881,7 +881,7 @@ def renew_account(account):
         def do_renew_submit(max_attempts=3):
             """
             完整执行续期表单填写、CloudFlare等待、点击Renew VPS。
-            返回 True 表示成功进入续期码输入页，False 表示失败。
+            返回 True 表示成功进入续期码输入页或已获取续期码，False 表示失败。
             """
             for attempt in range(max_attempts):
                 print(f"  [FORM] 尝试提交续期 (第 {attempt+1}/{max_attempts} 次)...", flush=True)
@@ -907,11 +907,17 @@ def renew_account(account):
                 print("  [CF] 等待 CloudFlare 验证 (60s)...", flush=True)
                 page.wait(60)
 
+                # ----- 点击前截图 -----
+                try:
+                    take_screenshot(page, f"before_click_{phone}.png", bot_token, chat_id,
+                                    f"📸 点击 Renew VPS 前 - {phone}")
+                except Exception as e:
+                    print(f"  [截图] 点击前截图失败: {e}", flush=True)
+
                 # 点击 Renew VPS
                 renew_vps_btn = page.ele("css:button[name=submit_button][type=button].btn-primary")
                 if not renew_vps_btn:
                     print("  [FORM] 未找到 Renew VPS 按钮", flush=True)
-                    # 可能页面加载失败，刷新重试
                     page.get("https://hax.co.id/vps-renew/")
                     page.wait.doc_loaded(timeout=15)
                     continue
@@ -922,21 +928,66 @@ def renew_account(account):
                 print("  [FORM] 点击 Renew VPS 完成", flush=True)
                 time.sleep(5)
 
-                # 检查是否成功：页面是否出现 "INPUT RENEW CODE" 链接
+                # ----- 点击后截图 -----
+                try:
+                    take_screenshot(page, f"after_click_{phone}.png", bot_token, chat_id,
+                                    f"📸 点击 Renew VPS 后 - {phone}")
+                except Exception as e:
+                    print(f"  [截图] 点击后截图失败: {e}", flush=True)
+
+                # 检查是否成功进入续期码输入页
+                success = False
                 for _ in range(6):
+                    # 1. 检查是否有 "INPUT RENEW CODE" 按钮
                     check_el = page.ele('css:a.btn[href="/vps-renew-code"]', timeout=2)
                     if check_el and check_el.is_displayed:
                         print("  [FORM] ✅ 检测到续期码输入页，提交成功", flush=True)
                         return True
-                    # 检查是否有错误提示（可能因限流等原因）
+
+                    # 2. 检查页面是否包含续期码（Base64 字符串）
+                    page_text = page.run_js("return document.body.innerText") or ""
+                    code_match = TG_RENEWAL_PATTERN.search(page_text)
+                    if code_match:
+                        code = code_match.group(0)
+                        write_code_to_file(code)
+                        print(f"  [FORM] ✅ 页面直接包含续期码，已写入文件: {code[:20]}...", flush=True)
+                        return True
+
+                    # 3. 检查是否出现 "All data centers provide Unlimited bandwidth" 信息
+                    if "All data centers provide Unlimited bandwidth" in page_text:
+                        print("  [FORM] 检测到 'All data centers provide Unlimited bandwidth' 信息，尝试继续...", flush=True)
+                        # 尝试点击可能的 "Continue" 或 "OK" 按钮
+                        continue_btn = page.ele("xpath://*[contains(text(), 'Continue') or contains(text(), 'OK') or contains(text(), 'Next')]", timeout=2)
+                        if continue_btn and continue_btn.is_displayed:
+                            continue_btn.click_self()
+                            print("  [FORM] 点击 Continue 按钮", flush=True)
+                            time.sleep(3)
+                            # 再次检查是否出现 "INPUT RENEW CODE"
+                            check_el2 = page.ele('css:a.btn[href="/vps-renew-code"]', timeout=2)
+                            if check_el2 and check_el2.is_displayed:
+                                print("  [FORM] ✅ 点击 Continue 后进入续期码页", flush=True)
+                                return True
+                        else:
+                            # 没有 Continue 按钮，可能页面会自动跳转，等待几秒
+                            time.sleep(5)
+                            # 再次检查
+                            check_el2 = page.ele('css:a.btn[href="/vps-renew-code"]', timeout=2)
+                            if check_el2 and check_el2.is_displayed:
+                                print("  [FORM] ✅ 等待后进入续期码页", flush=True)
+                                return True
+
+                    # 4. 检查是否有错误提示（但 "All data centers..." 不算错误，所以排除）
                     error = page.ele("xpath://*[contains(text(), 'error') or contains(text(), 'Error') or contains(text(), 'fail') or contains(text(), 'limit')]", timeout=1)
-                    if error and error.is_displayed:
+                    if error and error.is_displayed and "Unlimited bandwidth" not in error.text:
                         print(f"  [FORM] ⚠️ 发现错误提示: {error.text[:100]}", flush=True)
                         break
+
                     time.sleep(1)
+
                 # 未成功，重试
                 print("  [FORM] 未检测到成功进入续期码页，准备重试...", flush=True)
                 time.sleep(3)
+
             return False
 
         if not do_renew_submit():
@@ -1158,7 +1209,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (最终修正版 - 完善重试流程)", flush=True)
+    print("   HAX 自动续期 (最终修正版 - 增强截图与重试)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
