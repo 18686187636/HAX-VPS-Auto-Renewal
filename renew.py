@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (增强结果检查)
+HAX VPS Auto-Renewal (增强结果检查 + Valid until 判断)
 """
 import os
 import sys
 import time
 import re
 import json
-import base64
 import html
 import tempfile
 import random
@@ -25,6 +24,12 @@ try:
 except ImportError:
     sr = None
     AudioSegment = None
+
+# 尝试导入 dateutil 用于日期解析
+try:
+    from dateutil import parser as date_parser
+except ImportError:
+    date_parser = None
 
 # ===================== 环境变量 =====================
 ACCOUNTS_JSON = os.getenv("ACCOUNTS_JSON", "[]")
@@ -680,7 +685,7 @@ def close_ads(page):
             pass
     page.wait(3)
 
-# ===================== 修改后的 Consent 处理（增强版） =====================
+# ===================== Consent 处理 =====================
 def handle_consent(page):
     """处理 Cookie/隐私同意弹窗，带重试和明确日志"""
     try:
@@ -790,7 +795,7 @@ def renew_account(account):
 
         print("  ✅ 登录成功，开始续期流程", flush=True)
 
-        # ====== 新增明确日志：Consent 处理开始 ======
+        # 处理 Consent
         print("  ***Consent*** 开始处理同意弹窗...", flush=True)
         handle_consent(page)
         close_ads(page)
@@ -924,7 +929,7 @@ def renew_account(account):
 
         # ---------- 提交 ----------
         debug_print("提交续期")
-        print("  [SUBMIT] 提交续期...", flush=True)
+        print("  ***SUBMIT*** 提交续期...", flush=True)
         close_ads(page)
         submit_btn = None
         for selector in [
@@ -950,64 +955,90 @@ def renew_account(account):
             submit_btn.click_self(by_js=True)
         except Exception:
             submit_btn.click_self()
-        print("  [SUBMIT] 已点击提交，等待结果...", flush=True)
+        print("  ***SUBMIT*** 已点击提交，等待结果...", flush=True)
         time.sleep(60)
 
-        # ---------- 检查结果（增强弹窗清理） ----------
-        debug_print("检查续期结果")
-        for _ in range(3):
-            close_ads(page)
-            time.sleep(1)
-        # 额外使用 JS 移除所有可能的遮挡
-        page.run_js("""
-            document.querySelectorAll('.overlay, .modal, .popup, [class*="overlay"], [class*="modal"], [class*="popup"]')
-                .forEach(el => el.remove());
-        """)
-        time.sleep(2)
-        page.wait.doc_loaded(timeout=15)
-        page.wait(3)
-        # 再次关闭一次
-        close_ads(page)
+        # ---------- 检查结果：跳转到 vps-info 并根据 Valid until 判断 ----------
+        debug_print("检查续期结果：跳转到 vps-info 页面")
+        print("  [RESULT] 跳转到 https://hax.co.id/vps-info/ 检查续期结果...", flush=True)
 
-        # 重新获取页面内容（可能因弹窗导致加载中断）
+        # 1. 导航到 VPS 信息页
+        page.get("https://hax.co.id/vps-info")
+        page.wait.doc_loaded(timeout=20)
+        page.wait(5)
+
+        # 2. 关闭可能弹出的广告
+        close_ads(page)
+        page.wait(2)
+
+        # 3. 获取页面文本
         result_text = page.run_js("document.body.innerText") or ""
-        # 若结果为空，尝试刷新页面或等待更久
         if not result_text.strip():
             print("  [RESULT] 页面内容为空，等待 5 秒后重试...", flush=True)
             time.sleep(5)
             result_text = page.run_js("document.body.innerText") or ""
 
-        result_lower = result_text.lower()
-        is_success = False
-        expiry_date = None
-
-        success_keywords = [
-            "renewed successfully",
-            "renewal successful",
-            "subscription renewed",
-            "subscription successfully",
-            "续期成功",
-            "renewed",
-        ]
-        # 如果成功关键字出现，则判定成功
-        if any(kw in result_lower for kw in success_keywords):
-            is_success = True
-            print("  [RESULT] 检测到续期成功！", flush=True)
-            for pat in [
-                r"until\s+([A-Za-z]+\s+\d{1,2},?\s*\d{4})",
-                r"[Ee]xpir(?:e|y)[:\s]*(\d{4}-\d{2}-\d{2})",
-                r"[Vv]alid.*[Uu]ntil[:\s]*(\d{4}-\d{2}-\d{2})",
-                r"[到期期][：:]\s*(\d{4}[-/]\d{1,2}[-/]\d{1,2})",
-            ]:
-                m = re.search(pat, result_text)
-                if m:
-                    expiry_date = m.group(1)
-                    print(f"  [RESULT] 到期日: {expiry_date}", flush=True)
-                    break
+        # 4. 提取 Valid until 日期字符串
+        expiry_date_str = None
+        match = re.search(r'Valid until:\s*([^:\n]+?)(?:\n|$)', result_text, re.IGNORECASE)
+        if match:
+            expiry_date_str = match.group(1).strip()
+            print(f"  [RESULT] 原始到期日字符串: {expiry_date_str}", flush=True)
         else:
-            # 打印部分页面内容用于调试
-            print(f"  [RESULT] 页面内容片段: {result_text[:200]}...", flush=True)
+            print("  [RESULT] 未找到 'Valid until' 字段", flush=True)
 
+        # 5. 解析日期并判断是否在未来
+        is_success = False
+        expiry_date = None  # 保留用于通知
+        if expiry_date_str:
+            parsed_date = None
+            # 尝试使用 dateutil 解析（如果可用）
+            if date_parser:
+                try:
+                    parsed_date = date_parser.parse(expiry_date_str, fuzzy=True)
+                except Exception as e:
+                    debug_print(f"dateutil 解析失败: {e}")
+            # 如果 dateutil 不可用或解析失败，手动尝试常见格式
+            if parsed_date is None:
+                # 尝试 "Month Day HH:MM:SS Year GMT" 格式
+                months = {
+                    'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+                    'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
+                }
+                m = re.search(r'([A-Za-z]+)\s+(\d{1,2})\s+(\d{2}:\d{2}:\d{2})\s+(\d{4})', expiry_date_str, re.IGNORECASE)
+                if m:
+                    month_name, day, time_str, year = m.groups()
+                    month = months.get(month_name.lower())
+                    if month:
+                        day = int(day)
+                        year = int(year)
+                        hour, minute, second = map(int, time_str.split(':'))
+                        parsed_date = datetime(year, month, day, hour, minute, second)
+                else:
+                    # 尝试 "YYYY-MM-DD" 或 "YYYY/MM/DD"
+                    m = re.search(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', expiry_date_str)
+                    if m:
+                        year, month, day = map(int, m.groups())
+                        parsed_date = datetime(year, month, day)
+
+            if parsed_date:
+                # 确保有时区信息，假定为 UTC
+                if parsed_date.tzinfo is None:
+                    parsed_date = parsed_date.replace(tzinfo=timezone.utc)
+                now_utc = datetime.now(timezone.utc)
+                if parsed_date > now_utc + timedelta(minutes=1):
+                    is_success = True
+                    expiry_date = parsed_date.strftime("%Y-%m-%d %H:%M:%S UTC")
+                    print(f"  [RESULT] ✅ 续期成功，新到期日: {expiry_date} (未来时间)", flush=True)
+                else:
+                    print(f"  [RESULT] ❌ 到期日 {parsed_date} 不在未来，可能未续期", flush=True)
+            else:
+                print("  [RESULT] 无法解析日期格式，视为失败", flush=True)
+
+        if not is_success:
+            print("  [RESULT] ❌ 续期失败（未检测到有效的未来到期日）", flush=True)
+
+        # 6. 截图并发送通知
         try:
             result_png = f"result_{phone}.png"
             status = "成功" if is_success else "失败"
@@ -1020,7 +1051,7 @@ def renew_account(account):
             notify_success(phone, expiry_date or "未知日期", bot_token, chat_id)
             return True
         else:
-            error_msg = "Captcha 验证失败" if "captcha" in result_lower else "页面未显示明确结果"
+            error_msg = "未检测到有效的未来到期日（Valid until）"
             notify_failed(phone, "结果页", error_msg, bot_token, chat_id)
             print(f"  [RESULT] 失败: {error_msg}", flush=True)
             return False
@@ -1040,7 +1071,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (增强结果检查)", flush=True)
+    print("   HAX 自动续期 (增强结果检查 + Valid until)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
