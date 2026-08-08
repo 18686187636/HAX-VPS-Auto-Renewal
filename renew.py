@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (多账号 + Telethon 自动确认 - 最终完整版)
+HAX VPS Auto-Renewal (最终完整版 - 持续重试 Token 提取)
 """
 import os
 import sys
@@ -34,7 +34,7 @@ except ImportError:
     AudioSegment = None
 
 # ===================== 环境变量诊断 =====================
-print("🔍 [ENV] 开始读取环境变量...", flush=True)
+print("[ENV] 读取环境变量...", flush=True)
 ACCOUNTS_JSON = os.getenv("ACCOUNTS_JSON", "[]")
 ACCOUNTS = json.loads(ACCOUNTS_JSON)
 HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
@@ -49,24 +49,20 @@ SESSION_STRINGS = [
     os.getenv("SESSION_STRING_2", ""),
     os.getenv("SESSION_STRING_3", ""),
 ]
-
-# 如果所有 SESSION_STRING 都为空，尝试从 SESSION_STRING（单个）读取
 if not any(SESSION_STRINGS):
     fallback = os.getenv("SESSION_STRING", "")
     if fallback:
         SESSION_STRINGS = [fallback, "", ""]
-        print("⚠️ [ENV] 使用 SESSION_STRING 作为回退", flush=True)
+        print("[ENV] 使用 SESSION_STRING 作为回退", flush=True)
 
-print(f"[ENV] SESSION_STRING_1: {SESSION_STRINGS[0][:10] if SESSION_STRINGS[0] else '(空)'}", flush=True)
-print(f"[ENV] SESSION_STRING_2: {SESSION_STRINGS[1][:10] if SESSION_STRINGS[1] else '(空)'}", flush=True)
-print(f"[ENV] SESSION_STRING_3: {SESSION_STRINGS[2][:10] if SESSION_STRINGS[2] else '(空)'}", flush=True)
-
+print(f"[ENV] SESSION_STRING_1: {SESSION_STRINGS[0][:10] if SESSION_STRINGS[0] else '(空)'}")
+print(f"[ENV] SESSION_STRING_2: {SESSION_STRINGS[1][:10] if SESSION_STRINGS[1] else '(空)'}")
+print(f"[ENV] SESSION_STRING_3: {SESSION_STRINGS[2][:10] if SESSION_STRINGS[2] else '(空)'}")
 if not any(SESSION_STRINGS):
-    print("⚠️ [ENV] 未找到任何 SESSION_STRING，当前环境变量中 SESSION 相关项：")
-    for key in os.environ.keys():
-        if "SESSION" in key.upper():
-            val = os.environ[key]
-            print(f"   {key} = {val[:10] if val else '(空)'}")
+    print("[ENV] 警告：所有 SESSION_STRING 为空，将无法自动确认")
+    for k in os.environ.keys():
+        if "SESSION" in k.upper():
+            print(f"   {k} = {os.environ[k][:10]}")
     sys.stdout.flush()
 
 API_ID = int(os.getenv("API_ID", 0))
@@ -114,6 +110,7 @@ def check_proxy_ip(proxies):
             continue
     return False, None
 
+# ===================== 工具函数 =====================
 def get_beijing_time():
     return datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -197,6 +194,7 @@ def notify_failed(phone, step, error, bot_token, chat_id):
     msg = f"❌ <b>VPS 续期失败</b>\n\nHAX\n📱 {phone}\n📍 {step}\n⚠️ {error}\n⏰ {get_beijing_time()}"
     send_telegram_message(msg, bot_token, chat_id)
 
+# ===================== 续期码文件读写 =====================
 def read_code_from_file():
     try:
         if os.path.exists(CODE_FILE):
@@ -223,6 +221,7 @@ def write_code_to_file(code):
         print(f"  [文件] 写入失败: {e}", flush=True)
         return False
 
+# ===================== 登录检测 =====================
 def is_logged_in(page):
     try:
         logout_btn = page.ele("xpath://*[contains(text(), 'Logout') or contains(text(), 'Log out')]", timeout=2)
@@ -268,7 +267,7 @@ def accept_login_token_sync(token, session_string):
         print(f"  [Telethon] 执行异常: {e}", flush=True)
         return False
 
-# ===================== 增强 token 提取 =====================
+# ===================== 增强 token 提取（含轮询） =====================
 def extract_login_token(oauth_page, max_wait=30):
     """
     从 OAuth 页面中提取 login token，尝试多种方法，轮询等待。
@@ -276,7 +275,6 @@ def extract_login_token(oauth_page, max_wait=30):
     debug_print("尝试提取 login token...")
     start = time.time()
     token = None
-    # 先等待页面完全加载
     try:
         oauth_page.wait.doc_loaded(timeout=10)
     except:
@@ -347,7 +345,6 @@ def extract_login_token(oauth_page, max_wait=30):
                 token = m.group(1)
                 debug_print(f"从 script 提取到 token: {token[:10]}...")
                 return token
-            # 更通用的搜索
             m = re.search(r'token["\']?\s*[:=]\s*["\']([^"\']+)["\']', scripts)
             if m:
                 token = m.group(1)
@@ -389,7 +386,7 @@ def extract_login_token(oauth_page, max_wait=30):
         # 每 2 秒重试一次
         time.sleep(2)
 
-    # 如果所有方法均失败，保存页面 HTML 以便调试
+    # 失败后保存页面 HTML 以便调试
     try:
         html_debug = oauth_page.run_js("return document.documentElement.outerHTML;")
         with open("oauth_debug.html", "w", encoding="utf-8") as f:
@@ -464,10 +461,43 @@ def login_with_telegram_original(page, phone, bot_token=None, chat_id=None, sess
                 oauth_page.run_js("document.querySelector('form')?.submit();")
                 print("  [LOGIN] 使用 JS 提交", flush=True)
 
-            # 等待页面变化并提取 token（最多等待 30 秒）
+            # 等待 token 生成并尝试自动提取
             print("  [LOGIN] 等待 token 生成...", flush=True)
-            login_token = extract_login_token(oauth_page, max_wait=30)
+            login_token = extract_login_token(oauth_page, max_wait=20)
 
+            # 如果自动提取失败，进入手动确认循环，同时持续尝试提取
+            if not login_token:
+                print("  [LOGIN] 未自动提取到 token，进入手动确认模式", flush=True)
+                try:
+                    page.to_tab(page.tab_id)
+                except:
+                    pass
+                print("  [LOGIN] 📱 请在您的 Telegram 应用中点击“确认登录”", flush=True)
+                print("  [LOGIN] ⏳ 脚本将等待最多 3 分钟，期间将持续尝试自动提取", flush=True)
+
+                for i in range(180):
+                    time.sleep(1)
+                    if i % 30 == 0 and i > 0:
+                        # 每次循环再次尝试提取 token
+                        token_now = extract_login_token(oauth_page, max_wait=3)
+                        if token_now:
+                            login_token = token_now
+                            print(f"  [LOGIN] ✅ 在手动确认过程中提取到 token: {login_token[:10]}...", flush=True)
+                            break
+                        try:
+                            take_screenshot(page, f"waiting_confirm_{phone}.png",
+                                            bot_token, chat_id,
+                                            f"⏳ 等待确认登录 - {phone}\n已等待 {i} 秒")
+                        except:
+                            pass
+                        print(f"  [LOGIN] ⏳ 等待确认中... ({i}s)", flush=True)
+                    # 检查是否已跳转
+                    if "hax.co.id/vps-info" in (page.url or ""):
+                        print("  [LOGIN] ✅ 已跳转到 VPS 信息页，登录成功！", flush=True)
+                        return True
+                raise RuntimeError("登录超时：未在 3 分钟内收到确认")
+
+            # 如果成功提取到 token，进行自动确认
             if login_token:
                 print(f"  [LOGIN] 提取到 login token: {login_token[:10]}...", flush=True)
                 if TELEGRAM_AVAILABLE and API_ID and API_HASH:
@@ -484,33 +514,9 @@ def login_with_telegram_original(page, phone, bot_token=None, chat_id=None, sess
                         print("  [LOGIN] ⚠️ 自动确认失败，将进入手动确认模式", flush=True)
                 else:
                     print("  [LOGIN] ⚠️ Telethon 未配置，将进入手动确认模式", flush=True)
-            else:
-                print("  [LOGIN] 未找到 login token，将进入手动确认模式", flush=True)
 
-            # 手动确认模式
-            try:
-                page.to_tab(page.tab_id)
-            except:
-                pass
-
-            print("  [LOGIN] 📱 请在您的 Telegram 应用中点击“确认登录”", flush=True)
-            print("  [LOGIN] ⏳ 脚本将等待最多 3 分钟...", flush=True)
-
-            for i in range(180):
-                time.sleep(1)
-                if i % 30 == 0 and i > 0:
-                    try:
-                        take_screenshot(page, f"waiting_confirm_{phone}.png",
-                                        bot_token, chat_id,
-                                        f"⏳ 等待确认登录 - {phone}\n已等待 {i} 秒")
-                    except:
-                        pass
-                    print(f"  [LOGIN] ⏳ 等待确认中... ({i}s)", flush=True)
-                if "hax.co.id/vps-info" in (page.url or ""):
-                    print("  [LOGIN] ✅ 已跳转到 VPS 信息页，登录成功！", flush=True)
-                    return True
-
-            raise RuntimeError("登录超时：未在 3 分钟内收到确认")
+            # 最终如果还未成功，进入手动确认（但前面已经处理）
+            raise RuntimeError("登录失败")
 
     except Exception as e:
         print(f"  [LOGIN] 失败: {e}", flush=True)
@@ -533,7 +539,7 @@ def set_session_cookie(page, session_token):
         debug_print(f"JS 注入失败: {e}")
     return False
 
-# ===================== reCAPTCHA 音频求解 =====================
+# ===================== reCAPTCHA 音频求解（完整） =====================
 def find_frame(page, keyword):
     try:
         frames = page.get_frames()
@@ -881,6 +887,7 @@ def solve_arithmetic_captcha(page):
     print(f"  [CAPTCHA] 算式: {digits[0]} {op_symbol} {digits[1]} = {result}", flush=True)
     return result
 
+# ===================== 续期码获取（含文件轮询） =====================
 def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, timeout=1800, poll_interval=10):
     debug_print(f"进入 get_renewal_code_from_telegram，超时 {timeout}s")
     offsets = {}
@@ -939,6 +946,7 @@ def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, 
             print(f"  [CODE] 等待中... ({elapsed//60} 分钟)", flush=True)
     return "", None
 
+# ===================== 增强版广告关闭 =====================
 def close_ads(page):
     print("  [AD] 等待并关闭广告...")
     page.wait(3)
@@ -1081,6 +1089,18 @@ def renew_account(account, session_string=None):
                 raise RuntimeError("无法确认登录状态")
 
         print("  ✅ 登录成功，开始续期流程", flush=True)
+
+        # 捕获当前 session_token 以备后用
+        try:
+            cookies = page.run_js("return document.cookie;")
+            if cookies:
+                match = re.search(r'PHPSESSID=([^;]+)', cookies)
+                if match:
+                    with open("session_token.txt", "w") as f:
+                        f.write(match.group(1))
+                    print(f"  [TOKEN] ✅ 已捕获 session_token: {match.group(1)[:20]}...")
+        except Exception as e:
+            print(f"  [TOKEN] 捕获失败: {e}")
 
         handle_consent(page)
         close_ads(page)
@@ -1340,16 +1360,15 @@ def renew_account(account, session_string=None):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (多账号 + Telethon 自动确认 - 最终完整版)", flush=True)
+    print("   HAX 自动续期 (最终完整版 - 持续重试 Token 提取)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
         sys.exit(1)
     print(f"✅ 加载了 {len(ACCOUNTS)} 个账号", flush=True)
-    # 再次打印会话字符串状态
-    print(f"[MAIN] SESSION_STRING_1: {SESSION_STRINGS[0][:10] if SESSION_STRINGS[0] else '(空)'}", flush=True)
-    print(f"[MAIN] SESSION_STRING_2: {SESSION_STRINGS[1][:10] if SESSION_STRINGS[1] else '(空)'}", flush=True)
-    print(f"[MAIN] SESSION_STRING_3: {SESSION_STRINGS[2][:10] if SESSION_STRINGS[2] else '(空)'}", flush=True)
+    print(f"[MAIN] SESSION_STRING_1: {SESSION_STRINGS[0][:10] if SESSION_STRINGS[0] else '(空)'}")
+    print(f"[MAIN] SESSION_STRING_2: {SESSION_STRINGS[1][:10] if SESSION_STRINGS[1] else '(空)'}")
+    print(f"[MAIN] SESSION_STRING_3: {SESSION_STRINGS[2][:10] if SESSION_STRINGS[2] else '(空)'}")
     if not any(SESSION_STRINGS):
         print("❌ 所有 SESSION_STRING 均为空，请检查 GitHub Secrets 设置！", flush=True)
         sys.exit(1)
