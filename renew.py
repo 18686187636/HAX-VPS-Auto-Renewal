@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (多账号 + Telethon 自动确认 - 终极增强版)
+HAX VPS Auto-Renewal (多账号 + Telethon 自动确认 - 终极调试版)
 """
 import os
 import sys
 import time
 import re
 import json
-import base64
 import html
 import tempfile
 import random
@@ -20,7 +19,6 @@ from datetime import datetime, timezone, timedelta
 import requests as req_lib
 from ruyipage import launch, Keys
 
-# Telethon 相关
 try:
     from telethon import TelegramClient, functions
     from telethon.sessions import StringSession
@@ -28,7 +26,6 @@ try:
 except ImportError:
     TELEGRAM_AVAILABLE = False
 
-# 语音识别相关
 try:
     import speech_recognition as sr
     from pydub import AudioSegment
@@ -51,9 +48,13 @@ SESSION_STRINGS = [
     os.getenv("SESSION_STRING_2", ""),
     os.getenv("SESSION_STRING_3", ""),
 ]
-
 API_ID = int(os.getenv("API_ID", 0))
 API_HASH = os.getenv("API_HASH", "")
+
+# 启动诊断
+print("[INIT] SESSION_STRING_1:", SESSION_STRINGS[0][:10] if SESSION_STRINGS[0] else "EMPTY")
+print("[INIT] SESSION_STRING_2:", SESSION_STRINGS[1][:10] if SESSION_STRINGS[1] else "EMPTY")
+print("[INIT] SESSION_STRING_3:", SESSION_STRINGS[2][:10] if SESSION_STRINGS[2] else "EMPTY")
 
 def debug_print(*args, **kwargs):
     if DEBUG:
@@ -97,7 +98,6 @@ def check_proxy_ip(proxies):
             continue
     return False, None
 
-# ===================== 工具函数 =====================
 def get_beijing_time():
     return datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -181,7 +181,6 @@ def notify_failed(phone, step, error, bot_token, chat_id):
     msg = f"❌ <b>VPS 续期失败</b>\n\nHAX\n📱 {phone}\n📍 {step}\n⚠️ {error}\n⏰ {get_beijing_time()}"
     send_telegram_message(msg, bot_token, chat_id)
 
-# ===================== 续期码文件读写 =====================
 def read_code_from_file():
     try:
         if os.path.exists(CODE_FILE):
@@ -208,7 +207,6 @@ def write_code_to_file(code):
         print(f"  [文件] 写入失败: {e}", flush=True)
         return False
 
-# ===================== 登录检测 =====================
 def is_logged_in(page):
     try:
         logout_btn = page.ele("xpath://*[contains(text(), 'Logout') or contains(text(), 'Log out')]", timeout=2)
@@ -254,86 +252,73 @@ def accept_login_token_sync(token, session_string):
         print(f"  [Telethon] 执行异常: {e}", flush=True)
         return False
 
-# ===================== 增强的 Login Token 提取（含轮询） =====================
-def extract_login_token(oauth_page, max_wait=10):
-    """
-    从 OAuth 页面中提取 login token，尝试多种方法，最多等待 max_wait 秒。
-    """
+# ===================== 增强 token 提取 =====================
+def extract_login_token(oauth_page, max_wait=15):
     debug_print("尝试提取 login token...")
     start = time.time()
     token = None
-
     while time.time() - start < max_wait:
-        # 方法1: 从 window 对象（最常见）
+        # 1. window 对象
         token = oauth_page.run_js("return window.tgLogin?.token || window._tgLoginToken || '';")
-        if token:
-            debug_print(f"从 window 提取到 token: {token[:10]}...")
-            return token
+        if token: return token
 
-        # 方法2: 从 iframe 的 src 参数
+        # 2. iframe src
         try:
             src = oauth_page.run_js("return document.querySelector('iframe')?.src || '';")
             if src:
-                match = re.search(r'[?&]token=([^&]+)', src)
-                if match:
-                    token = match.group(1)
-                    debug_print(f"从 iframe src 提取到 token: {token[:10]}...")
-                    return token
-        except:
-            pass
+                m = re.search(r'[?&]token=([^&]+)', src)
+                if m: return m.group(1)
+        except: pass
 
-        # 方法3: 从页面 HTML 中搜索
-        try:
-            html_content = oauth_page.run_js("return document.documentElement.outerHTML;")
-            if html_content:
-                patterns = [
-                    r'"token"\s*:\s*"([^"]+)"',
-                    r"'token'\s*:\s*'([^']+)'",
-                    r'token\s*=\s*"([^"]+)"',
-                    r'token\s*=\s*\'([^\']+)\'',
-                    r'token\s*=\s*([^\s&]+)',
-                ]
-                for pat in patterns:
-                    match = re.search(pat, html_content)
-                    if match:
-                        token = match.group(1)
-                        debug_print(f"从 HTML 提取到 token: {token[:10]}...")
-                        return token
-        except:
-            pass
+        # 3. 遍历 window 所有属性，查找 base64 字符串
+        token = oauth_page.run_js("""
+            (() => {
+                for (let key in window) {
+                    try {
+                        let val = window[key];
+                        if (typeof val === 'string' && val.length > 30 && /^[A-Za-z0-9+/=]+$/.test(val)) {
+                            return val;
+                        }
+                    } catch(e) {}
+                }
+                return '';
+            })()
+        """)
+        if token: return token
 
-        # 方法4: 从 script 标签中搜索
-        try:
-            scripts = oauth_page.run_js("return Array.from(document.querySelectorAll('script')).map(s => s.innerText).join('\\n');")
-            if scripts:
-                # 搜索 tgLogin 或类似变量
-                match = re.search(r'tgLogin\s*=\s*\{[^}]*token\s*:\s*["\']([^"\']+)', scripts)
-                if match:
-                    token = match.group(1)
-                    debug_print(f"从 script 提取到 token: {token[:10]}...")
-                    return token
-        except:
-            pass
+        # 4. 从 HTML 中搜索
+        html_content = oauth_page.run_js("return document.documentElement.outerHTML;")
+        if html_content:
+            for pat in [
+                r'"token"\s*:\s*"([^"]+)"',
+                r"'token'\s*:\s*'([^']+)'",
+                r'token\s*=\s*"([^"]+)"',
+                r'token\s*=\s*\'([^\']+)\'',
+                r'token\s*=\s*([^\s&]+)',
+                r'data-token="([^"]+)"',
+            ]:
+                m = re.search(pat, html_content)
+                if m:
+                    tok = m.group(1)
+                    if len(tok) > 20:
+                        return tok
 
-        # 方法5: 从 localStorage 或 sessionStorage 中查找
-        try:
-            storage = oauth_page.run_js("return localStorage.getItem('tgLoginToken') || sessionStorage.getItem('tgLoginToken') || '';")
-            if storage:
-                token = storage
-                debug_print(f"从 storage 提取到 token: {token[:10]}...")
-                return token
-        except:
-            pass
+        # 5. script 标签
+        scripts = oauth_page.run_js("return Array.from(document.querySelectorAll('script')).map(s => s.innerText).join('\\n');")
+        if scripts:
+            m = re.search(r'tgLogin\s*=\s*\{[^}]*token\s*:\s*["\']([^"\']+)', scripts)
+            if m:
+                return m.group(1)
 
-        # 等待 0.5 秒后重试
-        time.sleep(0.5)
-
-    debug_print("所有 token 提取方法均失败")
+        time.sleep(1)
     return None
 
-# ===================== Telegram OAuth 登录（增强版） =====================
+# ===================== OAuth 登录（增强） =====================
 def login_with_telegram_original(page, phone, bot_token=None, chat_id=None, session_string=None):
     debug_print("进入 login_with_telegram_original")
+    if not session_string:
+        print("  [LOGIN] ❌ session_string 为空，请检查环境变量 SESSION_STRING_N")
+        raise RuntimeError("session_string 未提供")
     print(f"  [LOGIN] 尝试 Telegram OAuth 登录: {phone}", flush=True)
     try:
         iframe_xpath = "xpath://iframe[contains(@src, 'oauth.telegram.org')]"
@@ -391,11 +376,9 @@ def login_with_telegram_original(page, phone, bot_token=None, chat_id=None, sess
                 oauth_page.run_js("document.querySelector('form')?.submit();")
                 print("  [LOGIN] 使用 JS 提交", flush=True)
 
-            # 等待页面加载，然后提取 token（轮询最多10秒）
-            time.sleep(2)
-            login_token = extract_login_token(oauth_page, max_wait=10)
-
-            if login_token and session_string:
+            time.sleep(3)
+            login_token = extract_login_token(oauth_page, max_wait=15)
+            if login_token:
                 print(f"  [LOGIN] 提取到 login token: {login_token[:10]}...")
                 if TELEGRAM_AVAILABLE and API_ID and API_HASH:
                     print("  [LOGIN] 正在使用 Telethon 自动确认...")
@@ -406,19 +389,15 @@ def login_with_telegram_original(page, phone, bot_token=None, chat_id=None, sess
                             if "hax.co.id/vps-info" in (page.url or ""):
                                 print("  [LOGIN] 已跳转到 VPS 信息页")
                                 return True
-                        # 若未跳转，继续下面的逻辑
+                        # 若未跳转，继续手动模式
                     else:
                         print("  [LOGIN] ⚠️ 自动确认失败，将进入手动确认模式")
                 else:
                     print("  [LOGIN] ⚠️ Telethon 未配置，将进入手动确认模式")
             else:
-                if not login_token:
-                    print("  [LOGIN] 未找到 login token")
-                if not session_string:
-                    print("  [LOGIN] 未提供 session_string")
-                print("  [LOGIN] 将进入手动确认模式")
+                print("  [LOGIN] 未找到 login token，将进入手动确认模式")
 
-            # ----- 手动确认模式（保留原逻辑） -----
+            # 手动确认模式
             try:
                 page.to_tab(page.tab_id)
             except:
@@ -464,7 +443,7 @@ def set_session_cookie(page, session_token):
         debug_print(f"JS 注入失败: {e}")
     return False
 
-# ===================== reCAPTCHA 音频求解（完整实现） =====================
+# ===================== reCAPTCHA 音频求解（完整） =====================
 def find_frame(page, keyword):
     try:
         frames = page.get_frames()
@@ -725,7 +704,6 @@ def solve_recaptcha(page, timeout=60):
     print(f"  [reCAPTCHA] {timeout} 秒超时", flush=True)
     return False
 
-# ===================== 算术验证码 =====================
 def solve_arithmetic_captcha(page):
     debug_print("开始 solve_arithmetic_captcha")
     print("  [CAPTCHA] 识别算式验证码...", flush=True)
@@ -813,7 +791,6 @@ def solve_arithmetic_captcha(page):
     print(f"  [CAPTCHA] 算式: {digits[0]} {op_symbol} {digits[1]} = {result}", flush=True)
     return result
 
-# ===================== 续期码获取（含文件轮询） =====================
 def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, timeout=1800, poll_interval=10):
     debug_print(f"进入 get_renewal_code_from_telegram，超时 {timeout}s")
     offsets = {}
@@ -833,12 +810,10 @@ def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, 
     code = ""
     last_screenshot_minute = -1
     while elapsed < timeout:
-        # 每轮先检查文件
         file_code = read_code_from_file()
         if file_code:
             print(f"  [CODE] 从文件读取到续期码: {file_code[:20]}***，直接使用", flush=True)
             return file_code, "file"
-
         current_minute = elapsed // 60
         if current_minute > last_screenshot_minute and current_minute > 0:
             last_screenshot_minute = current_minute
@@ -848,8 +823,6 @@ def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, 
                                 f"⏳ 等待续期码 (已等待 {current_minute} 分钟) - {phone}")
             except Exception as e:
                 print(f"  [截图] 等待截图失败: {e}", flush=True)
-
-        # 轮询 Telegram
         for bt in bot_tokens:
             offset = offsets.get(bt['token'], 0)
             try:
@@ -876,7 +849,6 @@ def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, 
             print(f"  [CODE] 等待中... ({elapsed//60} 分钟)", flush=True)
     return "", None
 
-# ===================== 增强版广告关闭（含 JS 移除） =====================
 def close_ads(page):
     print("  [AD] 等待并关闭广告...")
     page.wait(3)
@@ -895,7 +867,6 @@ def close_ads(page):
         except Exception:
             pass
     page.wait(3)
-    
     js_remove = """
     (function() {
         var selectors = [
@@ -921,7 +892,6 @@ def close_ads(page):
     except Exception as e:
         debug_print(f"JS移除弹窗失败: {e}")
 
-# ===================== 处理 Consent 弹窗 =====================
 def handle_consent(page):
     try:
         consent_btn = None
@@ -982,7 +952,6 @@ def renew_account(account, session_string=None):
         page.wait.doc_loaded(timeout=20)
         page.wait(5)
 
-        # ---------- 尝试 Cookie 登录 ----------
         login_success = False
         if session_token:
             debug_print("尝试 Cookie 登录")
@@ -992,7 +961,7 @@ def renew_account(account, session_string=None):
             debug_print("Cookie 设置完成，跳转 vps-info")
             page.get("https://hax.co.id/vps-info")
             page.wait.doc_loaded(timeout=15)
-            page.get("https://hax.co.id/vps-info")  # 强制刷新
+            page.get("https://hax.co.id/vps-info")
             page.wait.doc_loaded(timeout=10)
             if is_logged_in(page):
                 print("  ✅ Cookie 登录成功", flush=True)
@@ -1012,7 +981,6 @@ def renew_account(account, session_string=None):
             if not login_success:
                 raise RuntimeError("Telegram 登录失败")
 
-        # 再次确认登录
         if not is_logged_in(page):
             print("  ⚠️ 登录后未检测到登录状态，重新加载...", flush=True)
             page.get("https://hax.co.id/vps-info")
@@ -1024,17 +992,14 @@ def renew_account(account, session_string=None):
 
         print("  ✅ 登录成功，开始续期流程", flush=True)
 
-        # ----- 1. 处理 Consent 和广告 -----
         handle_consent(page)
         close_ads(page)
 
-        # 登录成功截图
         try:
             take_screenshot(page, f"login_success_{phone}.png", bot_token, chat_id, f"✅ 登录成功 - {phone}")
         except Exception as e:
             print(f"  [截图] 登录截图失败: {e}", flush=True)
 
-        # ---------- 导航到续期 ----------
         debug_print("导航到 VPS 续期")
         vps_menu = None
         for _ in range(5):
@@ -1057,7 +1022,6 @@ def renew_account(account, session_string=None):
         print("  [NAV] 点击 VPS Renew", flush=True)
         page.wait(5)
 
-        # ---------- 填写表单 ----------
         debug_print("填写续期表单")
         web_input = page.ele("css:#web_address")
         if web_input:
@@ -1078,7 +1042,6 @@ def renew_account(account, session_string=None):
         print("  [FORM] 点击 Renew VPS", flush=True)
         page.wait(5)
 
-        # ----- 2. 点击 Renew VPS 后关闭广告 -----
         close_ads(page)
 
         try:
@@ -1086,7 +1049,6 @@ def renew_account(account, session_string=None):
         except Exception as e:
             print(f"  [截图] Renew VPS 截图失败: {e}", flush=True)
 
-        # ---------- 获取续期码（先读文件，若无则轮询） ----------
         debug_print("开始获取续期码")
         code = read_code_from_file()
         if code:
@@ -1115,11 +1077,9 @@ def renew_account(account, session_string=None):
                     pass
                 raise RuntimeError("未获取到续期码")
 
-        # 使用原始 Base64
         print(f"  [CODE] 使用原始码: {code[:20]}***", flush=True)
         renewal_code_to_input = code
 
-        # ---------- 进入续期码输入页 ----------
         debug_print("进入续期码输入页")
         renew_code_link = None
         for selector in [
@@ -1142,7 +1102,6 @@ def renew_account(account, session_string=None):
 
         close_ads(page)
 
-        # ---------- 算术验证码 ----------
         captcha_result = solve_arithmetic_captcha(page)
         if captcha_result is not None:
             code_input = page.ele("css:#captcha")
@@ -1150,7 +1109,6 @@ def renew_account(account, session_string=None):
                 code_input.input(str(captcha_result), clear=True)
                 print(f"  [CAPTCHA] 输入结果: {captcha_result}", flush=True)
 
-        # 填入续期码
         debug_print("填入续期码")
         vcode_input = None
         for selector in ["css:input.form-control:not(#captcha)", "css:input[name=code]", "css:input#code"]:
@@ -1171,7 +1129,6 @@ def renew_account(account, session_string=None):
             vcode_input.input(renewal_code_to_input, clear=True)
             print(f"  [CODE] 输入 renewal code (原始Base64): {renewal_code_to_input[:20]}***", flush=True)
 
-        # ---------- reCAPTCHA ----------
         debug_print("开始 reCAPTCHA")
         print("  [reCAPTCHA] 处理音频验证...", flush=True)
         recaptcha_solved = solve_recaptcha(page, timeout=90)
@@ -1181,7 +1138,6 @@ def renew_account(account, session_string=None):
             page.wait(60)
             recaptcha_solved = is_recaptcha_solved(page)
 
-        # ---------- 提交续期 ----------
         debug_print("提交续期")
         print("  [SUBMIT] 提交续期...", flush=True)
         close_ads(page)
@@ -1218,7 +1174,6 @@ def renew_account(account, session_string=None):
         print("  [SUBMIT] 已点击提交，等待结果...", flush=True)
         time.sleep(60)
 
-        # ---------- 检查结果 ----------
         debug_print("检查续期结果")
         for _ in range(3):
             close_ads(page)
@@ -1295,7 +1250,7 @@ def renew_account(account, session_string=None):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (多账号 + Telethon 自动确认 - 终极增强版)", flush=True)
+    print("   HAX 自动续期 (多账号 + Telethon 自动确认 - 终极调试版)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
