@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (增强结果检查 + 广告自动关闭)
+HAX VPS Auto-Renewal (增强广告关闭 + Valid until)
 """
 import os
 import sys
@@ -25,7 +25,6 @@ except ImportError:
     sr = None
     AudioSegment = None
 
-# 尝试导入 dateutil 用于日期解析
 try:
     from dateutil import parser as date_parser
 except ImportError:
@@ -573,10 +572,10 @@ def solve_arithmetic_captcha(page):
     print(f"  [CAPTCHA] URL: {[u.split('/')[-1][:30] for u in captcha_urls]}", flush=True)
     digits = []
     for url in captcha_urls[:2]:
-        after_dash = url.rsplit('-', 1)[-1] if '-' in url else ''
-        first_char = after_dash[0] if after_dash else ''
-        if first_char.isdigit():
-            digit = int(first_char)
+        # 改进：尝试从 URL 中提取所有数字，取最后一个非零数字
+        nums = re.findall(r'\d+', url)
+        if nums:
+            digit = int(nums[-1]) % 10  # 取最后一个数字
             digits.append(digit)
             print(f"  [CAPTCHA] URL提取数字: {digit}", flush=True)
         else:
@@ -665,62 +664,113 @@ def read_code_from_file():
         print(f"  [文件] 读取异常: {e}", flush=True)
     return None
 
-# ===================== 增强的广告关闭函数 =====================
-def close_ads(page):
-    """增强的广告关闭，使用多种策略"""
+# ============================================================
+# ===================== 增强广告关闭函数 ======================
+# ============================================================
+def close_ads(page, max_attempts=3):
+    """增强广告关闭，支持多种选择器、iframe、JS移除"""
     print("  [AD] 尝试多种方式关闭广告...")
     # 1. 按 ESC 键
     try:
         page.actions.press(Keys.ESCAPE).perform()
+        time.sleep(0.5)
+    except Exception:
+        pass
+
+    # 2. 点击空白区域
+    try:
+        page.actions.move(10, 10).click().perform()
+        time.sleep(0.5)
+    except Exception:
+        pass
+
+    # 3. 使用 JS 移除可能遮挡的 fixed/overlay 元素
+    try:
+        page.run_js("""
+            document.querySelectorAll('.overlay, .modal, .popup, [class*="overlay"], [class*="modal"], [class*="popup"], [role="dialog"], [style*="position: fixed"][style*="z-index"]')
+                .forEach(el => el.remove());
+            document.querySelectorAll('iframe[src*="ads"], iframe[src*="ad"], iframe[src*="doubleclick"], iframe[src*="googlead"]')
+                .forEach(el => el.remove());
+            // 移除所有高 z-index 的固定定位元素（可能遮挡）
+            document.querySelectorAll('[style*="position: fixed"][style*="z-index"]').forEach(el => {
+                if (parseInt(el.style.zIndex) > 100) el.remove();
+            });
+        """)
+        print("  [AD] 通过 JS 移除覆盖层和广告 iframe")
         time.sleep(1)
     except Exception:
         pass
 
-    # 2. 查找并点击各种可能的关闭按钮
+    # 4. 尝试多种关闭按钮选择器（包含文本、属性、类）
     close_selectors = [
         "xpath://*[contains(@class, 'close')]",
         "xpath://*[contains(@class, 'dismiss')]",
         "xpath://*[contains(@id, 'close')]",
+        "xpath://*[contains(@id, 'dismiss')]",
         "xpath://*[contains(text(), 'Close')]",
         "xpath://*[contains(text(), '×')]",
+        "xpath://*[contains(text(), 'Skip')]",
+        "xpath://*[contains(text(), '跳过')]",
         "xpath://button[contains(@aria-label, 'Close')]",
+        "xpath://button[contains(@aria-label, 'Dismiss')]",
         "xpath://*[contains(@onclick, 'close')]",
         "xpath://*[contains(@onclick, 'dismiss')]",
         "xpath://div[contains(@style, 'cursor: pointer')]",
+        "xpath://*[@data-dismiss='modal']",
+        "xpath://*[@data-dismiss='overlay']",
+        "css:.close",
+        "css:.dismiss",
+        "css:[aria-label='Close']",
+        "css:[aria-label='Dismiss']",
+        "text:×",
     ]
+
     for selector in close_selectors:
         try:
-            close_btn = page.ele(selector, timeout=1.5)
+            # 先尝试在默认上下文查找
+            close_btn = page.ele(selector, timeout=1)
             if close_btn and close_btn.is_displayed:
                 close_btn.click()
                 print(f"  [AD] 通过选择器 '{selector}' 点击关闭按钮")
-                time.sleep(2)
+                time.sleep(1)
                 return True
         except Exception:
-            continue
+            pass
 
-    # 3. 尝试点击页面左上角空白处（解除遮挡）
+    # 5. 尝试在 iframe 中查找关闭按钮
     try:
-        page.actions.move(10, 10).click().perform()
-        print("  [AD] 尝试点击页面空白区域")
-        time.sleep(1)
+        frames = page.get_frames()
+        for frame in frames:
+            try:
+                # 在 iframe 中尝试同样选择器
+                for selector in close_selectors:
+                    btn = frame.ele(selector, timeout=1)
+                    if btn and btn.is_displayed:
+                        btn.click()
+                        print(f"  [AD] 在 iframe 中通过选择器 '{selector}' 点击关闭按钮")
+                        time.sleep(1)
+                        return True
+            except:
+                continue
     except Exception:
         pass
 
-    # 4. 使用 JS 移除广告元素
+    # 6. 最后尝试点击所有可能是关闭按钮的元素（暴力点击）
     try:
-        page.run_js("""
-            document.querySelectorAll('.overlay, .modal, .popup, [class*="overlay"], [class*="modal"], [class*="popup"], [role="dialog"]')
-                .forEach(el => el.remove());
-            document.querySelectorAll('iframe[src*="ads"], iframe[src*="ad"]')
-                .forEach(el => el.remove());
-        """)
-        print("  [AD] 尝试用 JS 移除广告元素")
-        time.sleep(1)
-    except Exception:
+        elements = page.eles("xpath://*[contains(@class, 'close') or contains(@class, 'dismiss') or contains(@id, 'close') or contains(@id, 'dismiss')]")
+        for el in elements:
+            try:
+                if el.is_displayed:
+                    el.click()
+                    print("  [AD] 暴力点击类或 ID 包含 close/dismiss 的元素")
+                    time.sleep(0.5)
+                    return True
+            except:
+                pass
+    except:
         pass
 
-    print("  [AD] 广告关闭尝试完成")
+    print("  [AD] 所有关闭尝试均失败")
     return False
 
 # ===================== Consent 处理 =====================
@@ -996,7 +1046,7 @@ def renew_account(account):
         time.sleep(60)
 
         # ============================================================
-        # 改进的结果检查：点击广告，等待播放，尝试关闭，重试直到成功
+        # 改进的结果检查：点击广告，等待播放，重试关闭广告并获取 Valid until
         # ============================================================
         debug_print("检查续期结果：跳转到 vps-info 页面，处理广告并获取 Valid until")
         print("  [RESULT] 跳转到 https://hax.co.id/vps-info/ 检查续期结果...", flush=True)
@@ -1045,17 +1095,12 @@ def renew_account(account):
         print("  [AD] ⏳ 等待45秒广告播放完毕...", flush=True)
         time.sleep(45)
 
-        # 5. 循环尝试关闭广告并检查 Valid until，最多重试5次
+        # 5. 循环尝试关闭广告并检查 Valid until，最多重试10次（不刷新页面）
         expiry_date_str = None
-        for attempt in range(5):
+        for attempt in range(10):
             print(f"  [AD] 第 {attempt+1} 次尝试关闭广告残留并获取 Valid until...", flush=True)
             # 关闭广告
             close_ads(page)
-            page.wait(2)
-
-            # 刷新页面确保最新
-            page.get("https://hax.co.id/vps-info")
-            page.wait.doc_loaded(timeout=15)
             page.wait(2)
 
             # 获取页面文本
@@ -1073,9 +1118,9 @@ def renew_account(account):
                 break
             else:
                 print("  [RESULT] 仍未找到 Valid until，可能广告仍在遮挡，将重试...", flush=True)
-                time.sleep(3)
+                time.sleep(2)
 
-        # 如果经过5次重试仍未找到，则判定失败
+        # 如果经过10次重试仍未找到，则判定失败
         if expiry_date_str is None:
             print("  [RESULT] 多次重试后仍未找到 Valid until，续期可能失败", flush=True)
 
