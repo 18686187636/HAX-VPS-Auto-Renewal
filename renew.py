@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (最终修正版 - 增强截图与重试)
+HAX VPS Auto-Renewal (最终修正版 - 增强截图与重试 + CF等待120s)
 """
 import os
 import sys
@@ -904,8 +904,8 @@ def renew_account(account):
                     agreement.click_self(by_js=True)
                     print("  [FORM] 勾选协议", flush=True)
 
-                print("  [CF] 等待 CloudFlare 验证 (60s)...", flush=True)
-                page.wait(60)
+                print("  [CF] 等待 CloudFlare 验证 (120s)...", flush=True)
+                page.wait(120)   # <--- 修改为 120 秒
 
                 # ----- 点击前截图 -----
                 try:
@@ -1209,7 +1209,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (最终修正版 - 增强截图与重试)", flush=True)
+    print("   HAX 自动续期 (最终修正版 - 增强截图与重试 + CF等待120s)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
