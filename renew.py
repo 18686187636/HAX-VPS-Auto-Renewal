@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (多账号 + Telethon 自动确认 - 强化环境变量诊断)
+HAX VPS Auto-Renewal (多账号 + Telethon 自动确认 - 最终完整版)
 """
 import os
 import sys
@@ -33,9 +33,8 @@ except ImportError:
     sr = None
     AudioSegment = None
 
-# ===================== 环境变量读取（含诊断） =====================
+# ===================== 环境变量诊断 =====================
 print("🔍 [ENV] 开始读取环境变量...", flush=True)
-
 ACCOUNTS_JSON = os.getenv("ACCOUNTS_JSON", "[]")
 ACCOUNTS = json.loads(ACCOUNTS_JSON)
 HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
@@ -45,7 +44,6 @@ TG_RENEWAL_PATTERN = re.compile(r'[A-Za-z0-9+/=]{32,}')
 DEBUG = os.getenv("DEBUG", "true").lower() == "true"
 SEND_SCREENSHOTS = os.getenv("SEND_SCREENSHOTS", "true").lower() == "true"
 
-# 读取三个账号的 Telethon 会话字符串（优先从独立变量读取）
 SESSION_STRINGS = [
     os.getenv("SESSION_STRING_1", ""),
     os.getenv("SESSION_STRING_2", ""),
@@ -59,17 +57,16 @@ if not any(SESSION_STRINGS):
         SESSION_STRINGS = [fallback, "", ""]
         print("⚠️ [ENV] 使用 SESSION_STRING 作为回退", flush=True)
 
-# 打印诊断信息（强制刷新）
 print(f"[ENV] SESSION_STRING_1: {SESSION_STRINGS[0][:10] if SESSION_STRINGS[0] else '(空)'}", flush=True)
 print(f"[ENV] SESSION_STRING_2: {SESSION_STRINGS[1][:10] if SESSION_STRINGS[1] else '(空)'}", flush=True)
 print(f"[ENV] SESSION_STRING_3: {SESSION_STRINGS[2][:10] if SESSION_STRINGS[2] else '(空)'}", flush=True)
 
-# 如果仍全部为空，打印环境变量中所有 SESSION 相关内容以供排查
 if not any(SESSION_STRINGS):
     print("⚠️ [ENV] 未找到任何 SESSION_STRING，当前环境变量中 SESSION 相关项：")
     for key in os.environ.keys():
         if "SESSION" in key.upper():
-            print(f"   {key} = {os.environ[key][:10]}...")
+            val = os.environ[key]
+            print(f"   {key} = {val[:10] if val else '(空)'}")
     sys.stdout.flush()
 
 API_ID = int(os.getenv("API_ID", 0))
@@ -272,24 +269,38 @@ def accept_login_token_sync(token, session_string):
         return False
 
 # ===================== 增强 token 提取 =====================
-def extract_login_token(oauth_page, max_wait=15):
+def extract_login_token(oauth_page, max_wait=30):
+    """
+    从 OAuth 页面中提取 login token，尝试多种方法，轮询等待。
+    """
     debug_print("尝试提取 login token...")
     start = time.time()
     token = None
+    # 先等待页面完全加载
+    try:
+        oauth_page.wait.doc_loaded(timeout=10)
+    except:
+        pass
     while time.time() - start < max_wait:
-        # 1. window 对象
+        # 方法1: window 对象
         token = oauth_page.run_js("return window.tgLogin?.token || window._tgLoginToken || '';")
-        if token: return token
+        if token:
+            debug_print(f"从 window 提取到 token: {token[:10]}...")
+            return token
 
-        # 2. iframe src
+        # 方法2: iframe src
         try:
             src = oauth_page.run_js("return document.querySelector('iframe')?.src || '';")
             if src:
                 m = re.search(r'[?&]token=([^&]+)', src)
-                if m: return m.group(1)
-        except: pass
+                if m:
+                    token = m.group(1)
+                    debug_print(f"从 iframe src 提取到 token: {token[:10]}...")
+                    return token
+        except:
+            pass
 
-        # 3. 遍历 window 所有属性
+        # 方法3: 遍历 window 所有属性，查找 base64 字符串
         token = oauth_page.run_js("""
             (() => {
                 for (let key in window) {
@@ -303,36 +314,94 @@ def extract_login_token(oauth_page, max_wait=15):
                 return '';
             })()
         """)
-        if token: return token
+        if token:
+            debug_print(f"从 window 属性提取到 token: {token[:10]}...")
+            return token
 
-        # 4. HTML 搜索
+        # 方法4: 从 HTML 中搜索
         html_content = oauth_page.run_js("return document.documentElement.outerHTML;")
         if html_content:
-            for pat in [
+            patterns = [
                 r'"token"\s*:\s*"([^"]+)"',
                 r"'token'\s*:\s*'([^']+)'",
                 r'token\s*=\s*"([^"]+)"',
                 r'token\s*=\s*\'([^\']+)\'',
                 r'token\s*=\s*([^\s&]+)',
                 r'data-token="([^"]+)"',
-            ]:
+                r'name="token"\s+value="([^"]+)"',
+            ]
+            for pat in patterns:
                 m = re.search(pat, html_content)
                 if m:
                     tok = m.group(1)
                     if len(tok) > 20:
-                        return tok
+                        token = tok
+                        debug_print(f"从 HTML 提取到 token: {token[:10]}...")
+                        return token
 
-        # 5. script 标签
+        # 方法5: script 标签
         scripts = oauth_page.run_js("return Array.from(document.querySelectorAll('script')).map(s => s.innerText).join('\\n');")
         if scripts:
             m = re.search(r'tgLogin\s*=\s*\{[^}]*token\s*:\s*["\']([^"\']+)', scripts)
             if m:
-                return m.group(1)
+                token = m.group(1)
+                debug_print(f"从 script 提取到 token: {token[:10]}...")
+                return token
+            # 更通用的搜索
+            m = re.search(r'token["\']?\s*[:=]\s*["\']([^"\']+)["\']', scripts)
+            if m:
+                token = m.group(1)
+                debug_print(f"从 script (通用) 提取到 token: {token[:10]}...")
+                return token
 
-        time.sleep(1)
+        # 方法6: localStorage / sessionStorage
+        storage = oauth_page.run_js("""
+            (() => {
+                for (let key in localStorage) {
+                    let val = localStorage.getItem(key);
+                    if (typeof val === 'string' && val.length > 30 && /^[A-Za-z0-9+/=]+$/.test(val)) {
+                        return val;
+                    }
+                }
+                for (let key in sessionStorage) {
+                    let val = sessionStorage.getItem(key);
+                    if (typeof val === 'string' && val.length > 30 && /^[A-Za-z0-9+/=]+$/.test(val)) {
+                        return val;
+                    }
+                }
+                return '';
+            })()
+        """)
+        if storage:
+            token = storage
+            debug_print(f"从 storage 提取到 token: {token[:10]}...")
+            return token
+
+        # 方法7: 从 cookie 中查找
+        cookies = oauth_page.run_js("return document.cookie;")
+        if cookies:
+            m = re.search(r'token=([^;]+)', cookies)
+            if m:
+                token = m.group(1)
+                debug_print(f"从 cookie 提取到 token: {token[:10]}...")
+                return token
+
+        # 每 2 秒重试一次
+        time.sleep(2)
+
+    # 如果所有方法均失败，保存页面 HTML 以便调试
+    try:
+        html_debug = oauth_page.run_js("return document.documentElement.outerHTML;")
+        with open("oauth_debug.html", "w", encoding="utf-8") as f:
+            f.write(html_debug)
+        debug_print("已保存 oauth_debug.html 用于调试")
+    except:
+        pass
+
+    debug_print("所有 token 提取方法均失败")
     return None
 
-# ===================== OAuth 登录（增强） =====================
+# ===================== OAuth 登录（增强版） =====================
 def login_with_telegram_original(page, phone, bot_token=None, chat_id=None, session_string=None):
     debug_print("进入 login_with_telegram_original")
     if not session_string:
@@ -395,14 +464,16 @@ def login_with_telegram_original(page, phone, bot_token=None, chat_id=None, sess
                 oauth_page.run_js("document.querySelector('form')?.submit();")
                 print("  [LOGIN] 使用 JS 提交", flush=True)
 
-            time.sleep(3)
-            login_token = extract_login_token(oauth_page, max_wait=15)
+            # 等待页面变化并提取 token（最多等待 30 秒）
+            print("  [LOGIN] 等待 token 生成...", flush=True)
+            login_token = extract_login_token(oauth_page, max_wait=30)
+
             if login_token:
-                print(f"  [LOGIN] 提取到 login token: {login_token[:10]}...")
+                print(f"  [LOGIN] 提取到 login token: {login_token[:10]}...", flush=True)
                 if TELEGRAM_AVAILABLE and API_ID and API_HASH:
-                    print("  [LOGIN] 正在使用 Telethon 自动确认...")
+                    print("  [LOGIN] 正在使用 Telethon 自动确认...", flush=True)
                     if accept_login_token_sync(login_token, session_string):
-                        print("  [LOGIN] ✅ 自动确认成功，等待跳转...")
+                        print("  [LOGIN] ✅ 自动确认成功，等待跳转...", flush=True)
                         for _ in range(30):
                             time.sleep(1)
                             if "hax.co.id/vps-info" in (page.url or ""):
@@ -410,11 +481,11 @@ def login_with_telegram_original(page, phone, bot_token=None, chat_id=None, sess
                                 return True
                         # 若未跳转，继续手动模式
                     else:
-                        print("  [LOGIN] ⚠️ 自动确认失败，将进入手动确认模式")
+                        print("  [LOGIN] ⚠️ 自动确认失败，将进入手动确认模式", flush=True)
                 else:
-                    print("  [LOGIN] ⚠️ Telethon 未配置，将进入手动确认模式")
+                    print("  [LOGIN] ⚠️ Telethon 未配置，将进入手动确认模式", flush=True)
             else:
-                print("  [LOGIN] 未找到 login token，将进入手动确认模式")
+                print("  [LOGIN] 未找到 login token，将进入手动确认模式", flush=True)
 
             # 手动确认模式
             try:
@@ -462,7 +533,7 @@ def set_session_cookie(page, session_token):
         debug_print(f"JS 注入失败: {e}")
     return False
 
-# ===================== reCAPTCHA 音频求解（完整） =====================
+# ===================== reCAPTCHA 音频求解 =====================
 def find_frame(page, keyword):
     try:
         frames = page.get_frames()
@@ -1269,13 +1340,13 @@ def renew_account(account, session_string=None):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (多账号 + Telethon 自动确认 - 强化诊断)", flush=True)
+    print("   HAX 自动续期 (多账号 + Telethon 自动确认 - 最终完整版)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
         sys.exit(1)
     print(f"✅ 加载了 {len(ACCOUNTS)} 个账号", flush=True)
-    # 再次打印会话字符串状态（已经在脚本开头打印过，但再次强调）
+    # 再次打印会话字符串状态
     print(f"[MAIN] SESSION_STRING_1: {SESSION_STRINGS[0][:10] if SESSION_STRINGS[0] else '(空)'}", flush=True)
     print(f"[MAIN] SESSION_STRING_2: {SESSION_STRINGS[1][:10] if SESSION_STRINGS[1] else '(空)'}", flush=True)
     print(f"[MAIN] SESSION_STRING_3: {SESSION_STRINGS[2][:10] if SESSION_STRINGS[2] else '(空)'}", flush=True)
