@@ -173,11 +173,6 @@ jobs:
           ACCOUNTS_JSON: ${{ secrets.ACCOUNTS_JSON }}
           HEADLESS: "true"
           PROXY_SERVER: ${{ secrets.NODE_LINK != '' && 'http://127.0.0.1:1081' || '' }}
-          # ========== 新增：传递 Telegram 会话字符串 ==========
-          SESSION_STRING_1: ${{ secrets.SESSION_STRING_1 }}
-          SESSION_STRING_2: ${{ secrets.SESSION_STRING_2 }}
-          SESSION_STRING_3: ${{ secrets.SESSION_STRING_3 }}
-          # =================================================
         run: |
           # 启动账号1的转发器
           SESSION_STRING=${{ secrets.SESSION_STRING_1 }} \
