@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (增强弹窗清理 + 提交前截图 + 不解码续期码)
+HAX VPS Auto-Renewal (最终修正版 - 续期码文件读写)
 """
 import os
 import sys
@@ -34,7 +34,7 @@ PROXY_ADDR = os.getenv("PROXY_SERVER", "socks5://127.0.0.1:1080")
 CODE_FILE = "renewal_code.txt"
 TG_RENEWAL_PATTERN = re.compile(r'[A-Za-z0-9+/=]{32,}')
 DEBUG = os.getenv("DEBUG", "true").lower() == "true"
-SEND_SCREENSHOTS = os.getenv("SEND_SCREENSHOTS", "true").lower() == "true"   # 已修复括号
+SEND_SCREENSHOTS = os.getenv("SEND_SCREENSHOTS", "true").lower() == "true"
 
 def debug_print(*args, **kwargs):
     if DEBUG:
@@ -161,6 +161,35 @@ def notify_success(phone, expiry, bot_token, chat_id):
 def notify_failed(phone, step, error, bot_token, chat_id):
     msg = f"❌ <b>VPS 续期失败</b>\n\nHAX\n📱 {phone}\n📍 {step}\n⚠️ {error}\n⏰ {get_beijing_time()}"
     send_telegram_message(msg, bot_token, chat_id)
+
+# ===================== 续期码文件读写 =====================
+def read_code_from_file():
+    """从文件读取续期码，若存在且有效则返回，否则返回 None"""
+    try:
+        if os.path.exists(CODE_FILE):
+            with open(CODE_FILE, 'r', encoding='utf-8') as f:
+                code = f.read().strip()
+            if code and TG_RENEWAL_PATTERN.search(code):
+                print(f"  [文件] ✅ 从文件读取到续期码: {code[:20]}...")
+                return code
+            else:
+                print(f"  [文件] 文件内容无效或为空", flush=True)
+        else:
+            print(f"  [文件] 文件不存在", flush=True)
+    except Exception as e:
+        print(f"  [文件] 读取异常: {e}", flush=True)
+    return None
+
+def write_code_to_file(code):
+    """将续期码写入文件"""
+    try:
+        with open(CODE_FILE, 'w', encoding='utf-8') as f:
+            f.write(code)
+        print(f"  [文件] ✅ 续期码已写入文件: {code[:20]}...")
+        return True
+    except Exception as e:
+        print(f"  [文件] 写入失败: {e}", flush=True)
+        return False
 
 # ===================== 登录检测 =====================
 def is_logged_in(page):
@@ -611,8 +640,12 @@ def solve_arithmetic_captcha(page):
     print(f"  [CAPTCHA] 算式: {digits[0]} {op_symbol} {digits[1]} = {result}", flush=True)
     return result
 
-# ===================== 续期码获取（含等待截图） =====================
+# ===================== 续期码获取（含文件轮询） =====================
 def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, timeout=1800, poll_interval=10):
+    """
+    轮询 Telegram 获取续期码，同时每轮检查文件。
+    若从文件读取到有效码，则立即返回。
+    """
     debug_print(f"进入 get_renewal_code_from_telegram，超时 {timeout}s")
     offsets = {}
     for bt in bot_tokens:
@@ -631,6 +664,12 @@ def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, 
     code = ""
     last_screenshot_minute = -1
     while elapsed < timeout:
+        # 每轮先检查文件
+        file_code = read_code_from_file()
+        if file_code:
+            print(f"  [CODE] 从文件读取到续期码: {file_code[:20]}***，直接使用", flush=True)
+            return file_code, "file"
+
         current_minute = elapsed // 60
         if current_minute > last_screenshot_minute and current_minute > 0:
             last_screenshot_minute = current_minute
@@ -640,6 +679,8 @@ def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, 
                                 f"⏳ 等待续期码 (已等待 {current_minute} 分钟) - {phone}")
             except Exception as e:
                 print(f"  [截图] 等待截图失败: {e}", flush=True)
+
+        # 轮询 Telegram
         for bt in bot_tokens:
             offset = offsets.get(bt['token'], 0)
             try:
@@ -656,13 +697,11 @@ def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, 
                             match = TG_RENEWAL_PATTERN.search(text)
                             if match:
                                 code = match.group(0)
-                                with open(CODE_FILE, "w") as f:
-                                    f.write(code)
+                                # 写入文件
+                                write_code_to_file(code)
                                 return code, bt.get("label", bt['token'][-6:])
             except Exception:
                 pass
-        if code:
-            break
         time.sleep(poll_interval)
         elapsed += poll_interval
         if elapsed % 60 < poll_interval:
@@ -881,32 +920,39 @@ def renew_account(account):
         except Exception as e:
             print(f"  [截图] Renew VPS 截图失败: {e}", flush=True)
 
-        # ---------- 获取续期码 ----------
+        # ---------- 获取续期码（先读文件，若无则轮询） ----------
         debug_print("开始获取续期码")
-        print("  [CODE] 等待 @HaxTG_bot 发送续期码...", flush=True)
-        all_bots = []
-        seen = set()
-        for acc in ACCOUNTS:
-            t = acc.get("bot_token")
-            if t and t not in seen:
-                seen.add(t)
-                all_bots.append({"token": t, "label": f"...{t[-6:]}"})
-        if bot_token and bot_token not in seen:
-            all_bots.insert(0, {"token": bot_token, "label": f"...{bot_token[-6:]}"})
+        # 1. 优先从文件读取
+        code = read_code_from_file()
+        source = "file"
+        if code:
+            print(f"  [CODE] 直接从文件使用续期码: {code[:20]}***", flush=True)
+        else:
+            # 2. 文件没有，则轮询 Telegram
+            print("  [CODE] 文件无续期码，开始等待 @HaxTG_bot 发送...", flush=True)
+            all_bots = []
+            seen = set()
+            for acc in ACCOUNTS:
+                t = acc.get("bot_token")
+                if t and t not in seen:
+                    seen.add(t)
+                    all_bots.append({"token": t, "label": f"...{t[-6:]}"})
+            if bot_token and bot_token not in seen:
+                all_bots.insert(0, {"token": bot_token, "label": f"...{bot_token[-6:]}"})
 
-        code, source = get_renewal_code_from_telegram(
-            all_bots, page, phone, bot_token, chat_id,
-            timeout=1800, poll_interval=10
-        )
-        if not code:
-            try:
-                take_screenshot(page, f"timeout_{phone}.png", bot_token, chat_id,
-                                f"⏰ 续期码超时 - {phone}\n请检查 HaxTG_bot")
-            except:
-                pass
-            raise RuntimeError("未获取到续期码")
+            code, source = get_renewal_code_from_telegram(
+                all_bots, page, phone, bot_token, chat_id,
+                timeout=1800, poll_interval=10
+            )
+            if not code:
+                try:
+                    take_screenshot(page, f"timeout_{phone}.png", bot_token, chat_id,
+                                    f"⏰ 续期码超时 - {phone}\n请检查 HaxTG_bot")
+                except:
+                    pass
+                raise RuntimeError("未获取到续期码")
 
-        # ⚠️ 修改：不进行解码，直接使用原始 Base64 字符串
+        # 3. 使用原始 Base64（不解码）
         print(f"  [CODE] 使用原始码: {code[:20]}***", flush=True)
         renewal_code_to_input = code
 
@@ -1092,7 +1138,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (最终修正版)", flush=True)
+    print("   HAX 自动续期 (最终修正版 - 文件读写)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
