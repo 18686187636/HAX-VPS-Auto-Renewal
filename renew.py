@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (增强广告关闭 + Valid until)
+HAX VPS Auto-Renewal (10秒后读取文件或 Bot 最新消息)
 """
 import os
 import sys
 import time
 import re
 import json
+import base64
 import html
 import tempfile
 import random
@@ -24,11 +25,6 @@ try:
 except ImportError:
     sr = None
     AudioSegment = None
-
-try:
-    from dateutil import parser as date_parser
-except ImportError:
-    date_parser = None
 
 # ===================== 环境变量 =====================
 ACCOUNTS_JSON = os.getenv("ACCOUNTS_JSON", "[]")
@@ -572,10 +568,10 @@ def solve_arithmetic_captcha(page):
     print(f"  [CAPTCHA] URL: {[u.split('/')[-1][:30] for u in captcha_urls]}", flush=True)
     digits = []
     for url in captcha_urls[:2]:
-        # 改进：尝试从 URL 中提取所有数字，取最后一个非零数字
-        nums = re.findall(r'\d+', url)
-        if nums:
-            digit = int(nums[-1]) % 10  # 取最后一个数字
+        after_dash = url.rsplit('-', 1)[-1] if '-' in url else ''
+        first_char = after_dash[0] if after_dash else ''
+        if first_char.isdigit():
+            digit = int(first_char)
             digits.append(digit)
             print(f"  [CAPTCHA] URL提取数字: {digit}", flush=True)
         else:
@@ -664,137 +660,43 @@ def read_code_from_file():
         print(f"  [文件] 读取异常: {e}", flush=True)
     return None
 
-# ============================================================
-# ===================== 增强广告关闭函数 ======================
-# ============================================================
-def close_ads(page, max_attempts=3):
-    """增强广告关闭，支持多种选择器、iframe、JS移除"""
-    print("  [AD] 尝试多种方式关闭广告...")
-    # 1. 按 ESC 键
+# ===================== 广告关闭 =====================
+def close_ads(page):
+    print("  [AD] 等待并关闭广告...")
+    page.wait(3)
     try:
         page.actions.press(Keys.ESCAPE).perform()
-        time.sleep(0.5)
+        page.wait(1)
     except Exception:
         pass
-
-    # 2. 点击空白区域
-    try:
-        page.actions.move(10, 10).click().perform()
-        time.sleep(0.5)
-    except Exception:
-        pass
-
-    # 3. 使用 JS 移除可能遮挡的 fixed/overlay 元素
-    try:
-        page.run_js("""
-            document.querySelectorAll('.overlay, .modal, .popup, [class*="overlay"], [class*="modal"], [class*="popup"], [role="dialog"], [style*="position: fixed"][style*="z-index"]')
-                .forEach(el => el.remove());
-            document.querySelectorAll('iframe[src*="ads"], iframe[src*="ad"], iframe[src*="doubleclick"], iframe[src*="googlead"]')
-                .forEach(el => el.remove());
-            // 移除所有高 z-index 的固定定位元素（可能遮挡）
-            document.querySelectorAll('[style*="position: fixed"][style*="z-index"]').forEach(el => {
-                if (parseInt(el.style.zIndex) > 100) el.remove();
-            });
-        """)
-        print("  [AD] 通过 JS 移除覆盖层和广告 iframe")
-        time.sleep(1)
-    except Exception:
-        pass
-
-    # 4. 尝试多种关闭按钮选择器（包含文本、属性、类）
-    close_selectors = [
-        "xpath://*[contains(@class, 'close')]",
-        "xpath://*[contains(@class, 'dismiss')]",
-        "xpath://*[contains(@id, 'close')]",
-        "xpath://*[contains(@id, 'dismiss')]",
-        "xpath://*[contains(text(), 'Close')]",
-        "xpath://*[contains(text(), '×')]",
-        "xpath://*[contains(text(), 'Skip')]",
-        "xpath://*[contains(text(), '跳过')]",
-        "xpath://button[contains(@aria-label, 'Close')]",
-        "xpath://button[contains(@aria-label, 'Dismiss')]",
-        "xpath://*[contains(@onclick, 'close')]",
-        "xpath://*[contains(@onclick, 'dismiss')]",
-        "xpath://div[contains(@style, 'cursor: pointer')]",
-        "xpath://*[@data-dismiss='modal']",
-        "xpath://*[@data-dismiss='overlay']",
-        "css:.close",
-        "css:.dismiss",
-        "css:[aria-label='Close']",
-        "css:[aria-label='Dismiss']",
-        "text:×",
-    ]
-
-    for selector in close_selectors:
+    for keyword in ["Close", "close", "×", "关闭"]:
         try:
-            # 先尝试在默认上下文查找
-            close_btn = page.ele(selector, timeout=1)
-            if close_btn and close_btn.is_displayed:
-                close_btn.click()
-                print(f"  [AD] 通过选择器 '{selector}' 点击关闭按钮")
-                time.sleep(1)
-                return True
+            el = page.ele(f'xpath://*[contains(text(), "{keyword}")]')
+            if el and el.is_displayed:
+                el.click_self()
+                page.wait(1)
+                break
         except Exception:
             pass
+    page.wait(3)
 
-    # 5. 尝试在 iframe 中查找关闭按钮
+def handle_consent(page):
     try:
-        frames = page.get_frames()
-        for frame in frames:
+        consent_btn = None
+        keywords = ["Consent", "Accept", "Agree", "Got it", "OK", "Allow"]
+        for kw in keywords:
             try:
-                # 在 iframe 中尝试同样选择器
-                for selector in close_selectors:
-                    btn = frame.ele(selector, timeout=1)
-                    if btn and btn.is_displayed:
-                        btn.click()
-                        print(f"  [AD] 在 iframe 中通过选择器 '{selector}' 点击关闭按钮")
-                        time.sleep(1)
-                        return True
+                btn = page.ele(f"xpath://*[contains(text(), '{kw}')]", timeout=2)
+                if btn and btn.is_displayed:
+                    consent_btn = btn
+                    break
             except:
                 continue
-    except Exception:
-        pass
-
-    # 6. 最后尝试点击所有可能是关闭按钮的元素（暴力点击）
-    try:
-        elements = page.eles("xpath://*[contains(@class, 'close') or contains(@class, 'dismiss') or contains(@id, 'close') or contains(@id, 'dismiss')]")
-        for el in elements:
-            try:
-                if el.is_displayed:
-                    el.click()
-                    print("  [AD] 暴力点击类或 ID 包含 close/dismiss 的元素")
-                    time.sleep(0.5)
-                    return True
-            except:
-                pass
-    except:
-        pass
-
-    print("  [AD] 所有关闭尝试均失败")
-    return False
-
-# ===================== Consent 处理 =====================
-def handle_consent(page):
-    """处理 Cookie/隐私同意弹窗，带重试和明确日志"""
-    try:
-        for attempt in range(5):
-            consent_btn = None
-            keywords = ["Consent", "Accept", "Agree", "Got it", "OK", "Allow"]
-            for kw in keywords:
-                try:
-                    btn = page.ele(f"xpath://*[contains(text(), '{kw}')]", timeout=1)
-                    if btn and btn.is_displayed:
-                        consent_btn = btn
-                        break
-                except:
-                    continue
-            if consent_btn:
-                consent_btn.click_self()
-                print("  ***Consent*** 点击 Consent 按钮", flush=True)
-                page.wait(2)
-                return True
-            time.sleep(1)
-        print("  ***Consent*** 未检测到同意弹窗，跳过", flush=True)
+        if consent_btn:
+            consent_btn.click_self()
+            print("  [Consent] 点击 Consent 按钮", flush=True)
+            page.wait(2)
+            return True
         return False
     except Exception as e:
         debug_print(f"处理 Consent 失败: {e}")
@@ -870,9 +772,6 @@ def renew_account(account):
             login_success = login_with_telegram_original(page, phone)
             if not login_success:
                 raise RuntimeError("Telegram 登录失败")
-            print("  ***Consent*** 开始处理同意弹窗...", flush=True)
-            handle_consent(page)
-            close_ads(page)
 
         if not is_logged_in(page):
             print("  ⚠️ 登录后未检测到登录状态，重新加载...", flush=True)
@@ -885,7 +784,7 @@ def renew_account(account):
 
         print("  ✅ 登录成功，开始续期流程", flush=True)
 
-        # 保险关闭一次广告
+        handle_consent(page)
         close_ads(page)
 
         # 导航到续期
@@ -940,7 +839,7 @@ def renew_account(account):
         print("  [FORM] 点击 Renew VPS", flush=True)
         page.wait(5)
 
-        # ---------- 等待 10 秒后读取续期码 ----------
+        # ---------- 等待 10 秒后读取续期码（优先文件，其次 Bot） ----------
         print("  [CODE] 等待 10 秒后读取续期码...", flush=True)
         time.sleep(10)
 
@@ -954,6 +853,7 @@ def renew_account(account):
 
         print(f"  [CODE] 获取到续期码: {code[:20]}***", flush=True)
 
+        # ---------- 关闭广告（后续步骤） ----------
         close_ads(page)
 
         # ---------- 进入续期码输入页 ----------
@@ -1016,7 +916,7 @@ def renew_account(account):
 
         # ---------- 提交 ----------
         debug_print("提交续期")
-        print("  ***SUBMIT*** 提交续期...", flush=True)
+        print("  [SUBMIT] 提交续期...", flush=True)
         close_ads(page)
         submit_btn = None
         for selector in [
@@ -1042,148 +942,49 @@ def renew_account(account):
             submit_btn.click_self(by_js=True)
         except Exception:
             submit_btn.click_self()
-        print("  ***SUBMIT*** 已点击提交，等待结果...", flush=True)
+        print("  [SUBMIT] 已点击提交，等待结果...", flush=True)
         time.sleep(60)
 
-        # ============================================================
-        # 改进的结果检查：点击广告，等待播放，重试关闭广告并获取 Valid until
-        # ============================================================
-        debug_print("检查续期结果：跳转到 vps-info 页面，处理广告并获取 Valid until")
-        print("  [RESULT] 跳转到 https://hax.co.id/vps-info/ 检查续期结果...", flush=True)
-
-        # 1. 导航到 VPS 信息页
-        page.get("https://hax.co.id/vps-info")
-        page.wait.doc_loaded(timeout=20)
-        page.wait(5)
-
-        # 2. 关闭可能弹出的广告
-        close_ads(page)
-        page.wait(2)
-
-        # 3. 点击 "View a short ad" 按钮
-        print("  [AD] 查找并点击 'View a short ad' 按钮...", flush=True)
-        ad_btn = None
-        for selector in [
-            "text:View a short ad",
-            "text:View Short Ad",
-            "css:button:has-text('View a short ad')",
-            "xpath://*[contains(text(), 'View a short ad')]",
-            "xpath://button[contains(text(), 'View') and contains(text(), 'ad')]",
-        ]:
-            try:
-                ad_btn = page.ele(selector, timeout=3)
-                if ad_btn and ad_btn.is_displayed:
-                    break
-            except Exception:
-                continue
-
-        if ad_btn:
-            try:
-                ad_btn.click_self()
-                print("  [AD] ✅ 已点击 'View a short ad' 按钮，等待45秒广告播放...", flush=True)
-            except Exception as e:
-                print(f"  [AD] ⚠️ 点击广告按钮失败: {e}，尝试 JS 点击", flush=True)
-                try:
-                    page.run_js("document.querySelector('button:has-text(\"View a short ad\")')?.click();")
-                    print("  [AD] ✅ 通过 JS 点击广告按钮", flush=True)
-                except:
-                    print("  [AD] ❌ JS 点击也失败，跳过广告步骤", flush=True)
-        else:
-            print("  [AD] ⚠️ 未找到 'View a short ad' 按钮，跳过广告步骤", flush=True)
-
-        # 4. 等待45秒广告播放
-        print("  [AD] ⏳ 等待45秒广告播放完毕...", flush=True)
-        time.sleep(45)
-
-        # 5. 循环尝试关闭广告并检查 Valid until，最多重试10次（不刷新页面）
-        expiry_date_str = None
-        for attempt in range(10):
-            print(f"  [AD] 第 {attempt+1} 次尝试关闭广告残留并获取 Valid until...", flush=True)
-            # 关闭广告
+        # ---------- 检查结果 ----------
+        debug_print("检查续期结果")
+        for _ in range(3):
             close_ads(page)
-            page.wait(2)
-
-            # 获取页面文本
-            result_text = page.run_js("document.body.innerText") or ""
-            if not result_text.strip():
-                print("  [RESULT] 页面内容为空，继续等待...", flush=True)
-                time.sleep(2)
-                continue
-
-            # 尝试提取 Valid until
-            match = re.search(r'Valid until:\s*([^:\n]+?)(?:\n|$)', result_text, re.IGNORECASE)
-            if match:
-                expiry_date_str = match.group(1).strip()
-                print(f"  [RESULT] 成功提取到 Valid until: {expiry_date_str}", flush=True)
-                break
-            else:
-                print("  [RESULT] 仍未找到 Valid until，可能广告仍在遮挡，将重试...", flush=True)
-                time.sleep(2)
-
-        # 如果经过10次重试仍未找到，则判定失败
-        if expiry_date_str is None:
-            print("  [RESULT] 多次重试后仍未找到 Valid until，续期可能失败", flush=True)
-
-        # 6. 解析日期并判断是否在未来
+            time.sleep(1)
+        page.wait.doc_loaded(timeout=15)
+        page.wait(3)
+        close_ads(page)
+        result_text = page.run_js("document.body.innerText") or ""
+        result_lower = result_text.lower()
         is_success = False
         expiry_date = None
-        if expiry_date_str:
-            parsed_date = None
-            if date_parser:
-                try:
-                    parsed_date = date_parser.parse(expiry_date_str, fuzzy=True)
-                except Exception as e:
-                    debug_print(f"dateutil 解析失败: {e}")
-            if parsed_date is None:
-                months = {
-                    'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
-                    'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
-                }
-                m = re.search(r'([A-Za-z]+)\s+(\d{1,2})\s+(\d{2}:\d{2}:\d{2})\s+(\d{4})', expiry_date_str, re.IGNORECASE)
+        success_keywords = [
+            "renewed successfully",
+            "renewal successful",
+            "subscription renewed",
+            "subscription successfully",
+            "续期成功",
+            "renewed",
+        ]
+        if any(kw in result_lower for kw in success_keywords):
+            is_success = True
+            print("  [RESULT] 检测到续期成功！", flush=True)
+            for pat in [
+                r"until\s+([A-Za-z]+\s+\d{1,2},?\s*\d{4})",
+                r"[Ee]xpir(?:e|y)[:\s]*(\d{4}-\d{2}-\d{2})",
+                r"[Vv]alid.*[Uu]ntil[:\s]*(\d{4}-\d{2}-\d{2})",
+                r"[到期期][：:]\s*(\d{4}[-/]\d{1,2}[-/]\d{1,2})",
+            ]:
+                m = re.search(pat, result_text)
                 if m:
-                    month_name, day, time_str, year = m.groups()
-                    month = months.get(month_name.lower())
-                    if month:
-                        day = int(day)
-                        year = int(year)
-                        hour, minute, second = map(int, time_str.split(':'))
-                        parsed_date = datetime(year, month, day, hour, minute, second)
-                else:
-                    m = re.search(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', expiry_date_str)
-                    if m:
-                        year, month, day = map(int, m.groups())
-                        parsed_date = datetime(year, month, day)
-
-            if parsed_date:
-                if parsed_date.tzinfo is None:
-                    parsed_date = parsed_date.replace(tzinfo=timezone.utc)
-                now_utc = datetime.now(timezone.utc)
-                if parsed_date > now_utc + timedelta(minutes=1):
-                    is_success = True
-                    expiry_date = parsed_date.strftime("%Y-%m-%d %H:%M:%S UTC")
-                    print(f"  [RESULT] ✅ 续期成功，新到期日: {expiry_date} (未来时间)", flush=True)
-                else:
-                    print(f"  [RESULT] ❌ 到期日 {parsed_date} 不在未来，可能未续期", flush=True)
-            else:
-                print("  [RESULT] 无法解析日期格式，视为失败", flush=True)
-
-        if not is_success:
-            print("  [RESULT] ❌ 续期失败（未检测到有效的未来到期日）", flush=True)
-
-        # 7. 截图并发送通知
-        try:
-            result_png = f"result_{phone}.png"
-            status = "成功" if is_success else "失败"
-            caption = f"{'✅' if is_success else '❌'} {status} - {phone}\n到期日: {expiry_date or '未知'}"
-            take_screenshot(page, result_png, bot_token, chat_id, caption)
-        except Exception as e:
-            print(f"  [截图] 结果截图失败: {e}", flush=True)
+                    expiry_date = m.group(1)
+                    print(f"  [RESULT] 到期日: {expiry_date}", flush=True)
+                    break
 
         if is_success:
             notify_success(phone, expiry_date or "未知日期", bot_token, chat_id)
             return True
         else:
-            error_msg = "未检测到有效的未来到期日（Valid until）"
+            error_msg = "Captcha 验证失败" if "captcha" in result_lower else "页面未显示明确结果"
             notify_failed(phone, "结果页", error_msg, bot_token, chat_id)
             print(f"  [RESULT] 失败: {error_msg}", flush=True)
             return False
@@ -1203,7 +1004,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (增强广告关闭 + Valid until)", flush=True)
+    print("   HAX 自动续期 (文件 + Bot 双重读取)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
