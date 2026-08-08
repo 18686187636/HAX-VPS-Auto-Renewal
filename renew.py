@@ -680,23 +680,29 @@ def close_ads(page):
             pass
     page.wait(3)
 
+# ===================== 修改后的 Consent 处理（增强版） =====================
 def handle_consent(page):
+    """处理 Cookie/隐私同意弹窗，带重试和明确日志"""
     try:
-        consent_btn = None
-        keywords = ["Consent", "Accept", "Agree", "Got it", "OK", "Allow"]
-        for kw in keywords:
-            try:
-                btn = page.ele(f"xpath://*[contains(text(), '{kw}')]", timeout=2)
-                if btn and btn.is_displayed:
-                    consent_btn = btn
-                    break
-            except:
-                continue
-        if consent_btn:
-            consent_btn.click_self()
-            print("  [Consent] 点击 Consent 按钮", flush=True)
-            page.wait(2)
-            return True
+        # 等待最多 5 秒，循环检测同意按钮
+        for attempt in range(5):
+            consent_btn = None
+            keywords = ["Consent", "Accept", "Agree", "Got it", "OK", "Allow"]
+            for kw in keywords:
+                try:
+                    btn = page.ele(f"xpath://*[contains(text(), '{kw}')]", timeout=1)
+                    if btn and btn.is_displayed:
+                        consent_btn = btn
+                        break
+                except:
+                    continue
+            if consent_btn:
+                consent_btn.click_self()
+                print("  ***Consent*** 点击 Consent 按钮", flush=True)
+                page.wait(2)
+                return True
+            time.sleep(1)  # 等待弹窗可能出现
+        print("  ***Consent*** 未检测到同意弹窗，跳过", flush=True)
         return False
     except Exception as e:
         debug_print(f"处理 Consent 失败: {e}")
@@ -784,6 +790,8 @@ def renew_account(account):
 
         print("  ✅ 登录成功，开始续期流程", flush=True)
 
+        # ====== 新增明确日志：Consent 处理开始 ======
+        print("  ***Consent*** 开始处理同意弹窗...", flush=True)
         handle_consent(page)
         close_ads(page)
 
