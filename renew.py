@@ -783,6 +783,10 @@ def renew_account(account):
             login_success = login_with_telegram_original(page, phone)
             if not login_success:
                 raise RuntimeError("Telegram 登录失败")
+            # ---- OAuth 登录成功后立即处理 Consent 和广告 ----
+            print("  ***Consent*** 开始处理同意弹窗...", flush=True)
+            handle_consent(page)
+            close_ads(page)
 
         if not is_logged_in(page):
             print("  ⚠️ 登录后未检测到登录状态，重新加载...", flush=True)
@@ -795,9 +799,8 @@ def renew_account(account):
 
         print("  ✅ 登录成功，开始续期流程", flush=True)
 
-        # 处理 Consent
-        print("  ***Consent*** 开始处理同意弹窗...", flush=True)
-        handle_consent(page)
+        # 注意：handle_consent 已在 OAuth 分支中调用，这里不再重复调用
+        # 但为了保险，关闭一次广告（可能残留）
         close_ads(page)
 
         # 导航到续期
