@@ -668,7 +668,7 @@ def read_code_from_file():
 # ===================== 广告关闭 =====================
 def close_ads(page):
     print("  [AD] 等待并关闭广告...")
-    page.wait(3)
+    page.wait(10)
     try:
         page.actions.press(Keys.ESCAPE).perform()
         page.wait(1)
@@ -683,7 +683,7 @@ def close_ads(page):
                 break
         except Exception:
             pass
-    page.wait(3)
+    page.wait(10)
 
 # ===================== Consent 处理 =====================
 def handle_consent(page):
