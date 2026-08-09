@@ -869,22 +869,7 @@ def renew_account(account):
         launch_args = {
             "headless": HEADLESS,
             "proxy": PROXY_ADDR if proxies else None,
-            "arguments": [
-                "--window-size=1366,768",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-features=ChromeWhatsNewUI",
-                "--disable-infobars",
-                "--disable-web-security",
-                "--disable-features=IsolateOrigins,site-per-process",
-                "--disable-site-isolation-trials",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            ],
-            "experimental_options": {
-                "excludeSwitches": ["enable-automation"],
-                "useAutomationExtension": False,
-            }
+            "window_size": (1366, 768),
         }
         print("  [BROWSER] 正在启动浏览器...", flush=True)
         page = launch(**launch_args)
