@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (最终修正版 - 全流程截图调试)
+HAX VPS Auto-Renewal (最终版 - 修复 Turnstile 验证)
 """
 import os
 import sys
@@ -168,7 +168,6 @@ def notify_failed(phone, step, error, bot_token, chat_id):
 
 # ===================== 续期码文件读写 =====================
 def read_code_from_file():
-    """从文件读取续期码，若存在且有效则返回，否则返回 None"""
     try:
         if os.path.exists(CODE_FILE):
             with open(CODE_FILE, 'r', encoding='utf-8') as f:
@@ -185,7 +184,6 @@ def read_code_from_file():
     return None
 
 def write_code_to_file(code):
-    """将续期码写入文件"""
     try:
         with open(CODE_FILE, 'w', encoding='utf-8') as f:
             f.write(code)
@@ -295,7 +293,65 @@ def set_session_cookie(page, session_token):
         debug_print(f"JS 注入失败: {e}")
     return False
 
-# ===================== reCAPTCHA 音频求解（完整） =====================
+# ===================== Turnstile 处理（新增） =====================
+def handle_turnstile(page, timeout=120):
+    """
+    处理 CloudFlare Turnstile 验证。
+    返回 True 表示成功，False 表示失败或超时。
+    """
+    start = time.time()
+    while time.time() - start < timeout:
+        # 1. 检测是否已有 token（验证通过）
+        token = page.run_js("""
+            (() => {
+                const el = document.querySelector('textarea[name="cf-turnstile-response"]');
+                return el ? el.value : '';
+            })()
+        """)
+        if token and len(token) > 20:
+            print("  [Turnstile] 验证通过（已获取 token）")
+            return True
+
+        # 2. 检测挑战框是否消失
+        iframe = page.ele("css:iframe[src*='challenges.cloudflare.com']", timeout=1)
+        if not iframe:
+            # 可能验证通过，检查表单是否可见
+            web_input = page.ele("css:#web_address", timeout=1)
+            if web_input and web_input.is_displayed:
+                print("  [Turnstile] 挑战框消失，表单可见，视为通过")
+                return True
+
+        # 3. 尝试点击 Turnstile 复选框（某些版本）
+        try:
+            checkbox = page.ele("css:.cf-turnstile iframe", timeout=2)
+            if checkbox:
+                with page.with_frame(checkbox) as frame:
+                    chk = frame.ele("css:input[type='checkbox']", timeout=2)
+                    if chk and not chk.is_checked:
+                        chk.click()
+                        print("  [Turnstile] 点击复选框")
+                        time.sleep(2)
+                        continue
+        except:
+            pass
+
+        # 4. 检测是否出现验证失败提示
+        body = page.run_js("document.body.innerText") or ""
+        if "验证失败" in body or "challenge failed" in body.lower():
+            print("  [Turnstile] 页面提示验证失败")
+            return False
+
+        # 5. 进度提示
+        elapsed = int(time.time() - start)
+        if elapsed % 10 == 0 and elapsed > 0:
+            print(f"  [Turnstile] 等待中... {elapsed}s")
+
+        time.sleep(2)
+
+    print("  [Turnstile] 超时")
+    return False
+
+# ===================== reCAPTCHA 音频求解（原有） =====================
 def find_frame(page, keyword):
     try:
         frames = page.get_frames()
@@ -644,12 +700,8 @@ def solve_arithmetic_captcha(page):
     print(f"  [CAPTCHA] 算式: {digits[0]} {op_symbol} {digits[1]} = {result}", flush=True)
     return result
 
-# ===================== 续期码获取（含文件轮询） =====================
+# ===================== 续期码获取 =====================
 def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, timeout=1800, poll_interval=10):
-    """
-    轮询 Telegram 获取续期码，同时每轮检查文件。
-    若从文件读取到有效码，则立即返回。
-    """
     debug_print(f"进入 get_renewal_code_from_telegram，超时 {timeout}s")
     offsets = {}
     for bt in bot_tokens:
@@ -668,7 +720,6 @@ def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, 
     code = ""
     last_screenshot_minute = -1
     while elapsed < timeout:
-        # 每轮先检查文件
         file_code = read_code_from_file()
         if file_code:
             print(f"  [CODE] 从文件读取到续期码: {file_code[:20]}***，直接使用", flush=True)
@@ -684,7 +735,6 @@ def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, 
             except Exception as e:
                 print(f"  [截图] 等待截图失败: {e}", flush=True)
 
-        # 轮询 Telegram
         for bt in bot_tokens:
             offset = offsets.get(bt['token'], 0)
             try:
@@ -711,19 +761,16 @@ def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, 
             print(f"  [CODE] 等待中... ({elapsed//60} 分钟)", flush=True)
     return "", None
 
-# ===================== 增强版广告关闭（含 JS 移除） =====================
+# ===================== 广告关闭 =====================
 def close_ads(page):
-    """按照本地脚本方式关闭广告，并额外用 JS 移除遮挡元素"""
     print("  [AD] 等待并关闭广告...")
     page.wait(3)
-    # 尝试 ESC
     try:
         page.actions.press(Keys.ESCAPE).perform()
         page.wait(1)
         print("  [AD] 已按 ESC")
     except Exception:
         pass
-    # 尝试文本按钮
     closed = False
     for keyword in ["Close", "close", "×", "关闭"]:
         try:
@@ -740,7 +787,6 @@ def close_ads(page):
         print("  [AD] 未找到文本关闭按钮")
     page.wait(3)
     
-    # 额外通过 JS 移除常见弹窗元素
     js_remove = """
     (function() {
         var selectors = [
@@ -768,7 +814,6 @@ def close_ads(page):
         debug_print(f"JS移除弹窗失败: {e}")
         print("  [AD] JS移除弹窗失败")
 
-# ===================== 处理 Consent 弹窗 =====================
 def handle_consent(page):
     try:
         consent_btn = None
@@ -818,7 +863,6 @@ def renew_account(account):
         print("🔗 代理不可用，使用直连", flush=True)
 
     page = None
-    # 定义本地截图函数，自动带上手机号和时间
     def step_screenshot(step_name, caption_extra=""):
         try:
             timestamp = datetime.now().strftime("%H%M%S")
@@ -831,11 +875,34 @@ def renew_account(account):
 
     try:
         debug_print("准备启动浏览器...")
-        launch_args = {"headless": HEADLESS, "window_size": (1366, 768)}
-        if proxies is not None:
-            launch_args["proxy"] = PROXY_ADDR
-        print("  [BROWSER] 正在启动浏览器（此步骤可能较慢）...", flush=True)
+        # 优化启动参数，规避自动化检测
+        launch_args = {
+            "headless": HEADLESS,
+            "window_size": (1366, 768),
+            "proxy": PROXY_ADDR if proxies else None,
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "arguments": [
+                "--disable-blink-features=AutomationControlled",
+                "--disable-features=ChromeWhatsNewUI",
+                "--disable-infobars",
+                "--disable-web-security",
+                "--disable-features=IsolateOrigins,site-per-process",
+                "--disable-site-isolation-trials",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+            ],
+            "experimental_options": {
+                "excludeSwitches": ["enable-automation"],
+                "useAutomationExtension": False,
+            }
+        }
+        print("  [BROWSER] 正在启动浏览器...", flush=True)
         page = launch(**launch_args)
+        # 隐藏自动化特征
+        page.run_js("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        page.run_js("window.chrome = { runtime: {} }")
+        page.run_js("Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]})")
+
         debug_print("浏览器启动成功，开始访问登录页")
         page.get("https://hax.co.id/login")
         page.wait.doc_loaded(timeout=20)
@@ -932,10 +999,44 @@ def renew_account(account):
             print("  [FORM] 协议已勾选或未找到", flush=True)
         step_screenshot("11_form_filled", "表单填写完成")
 
-        print("  [CF] 等待 CloudFlare 验证 (60s)...", flush=True)
-        page.wait(60)
-        step_screenshot("12_after_cf_wait", "等待CF验证后")
+        # ========== 关键改进：处理 Turnstile 验证 ==========
+        print("  [Turnstile] 等待 CloudFlare Turnstile 验证...", flush=True)
+        if not handle_turnstile(page, timeout=120):
+            print("  [Turnstile] 首次验证失败，刷新页面重试...")
+            page.get("https://hax.co.id/vps-renew")
+            page.wait.doc_loaded(timeout=15)
+            # 重新填写表单（可能因刷新丢失）
+            web_input = page.ele("css:#web_address", timeout=5)
+            if web_input:
+                web_input.input("hax.co.id", clear=True)
+            agreement = page.ele('css:input[name="agreement"][value="yes"]')
+            if agreement and not agreement.is_checked:
+                agreement.click_self(by_js=True)
+            if not handle_turnstile(page, timeout=90):
+                # 若再次失败，尝试强制点击复选框（可能隐藏）
+                print("  [Turnstile] 再次失败，尝试强制点击...")
+                try:
+                    # 尝试通过 JS 触发 Turnstile 渲染回调
+                    page.run_js("""
+                        if (typeof turnstile !== 'undefined') {
+                            turnstile.render(document.querySelector('.cf-turnstile'), {
+                                sitekey: '...',
+                                callback: function(token) {
+                                    console.log('Turnstile callback', token);
+                                    document.querySelector('textarea[name="cf-turnstile-response"]').value = token;
+                                }
+                            });
+                        }
+                    """)
+                    time.sleep(5)
+                except:
+                    pass
+                # 最后等待并检测
+                if not handle_turnstile(page, timeout=60):
+                    raise RuntimeError("CloudFlare Turnstile 验证无法自动通过，请检查代理或手动处理")
+        step_screenshot("12_after_turnstile", "Turnstile验证完成")
 
+        # ---------- 点击续期按钮 ----------
         renew_vps_btn = page.ele("css:button[name=submit_button][type=button].btn-primary")
         if not renew_vps_btn:
             step_screenshot("13_renew_vps_btn_not_found", "未找到 Renew VPS 按钮")
@@ -949,15 +1050,13 @@ def renew_account(account):
         close_ads(page)
         step_screenshot("15_after_renew_vps_ad", "Renew VPS 后关闭广告")
 
-        # ---------- 获取续期码（先读文件，若无则轮询） ----------
+        # ---------- 获取续期码 ----------
         debug_print("开始获取续期码")
-        # 1. 优先从文件读取
         code = read_code_from_file()
         source = "file"
         if code:
             print(f"  [CODE] 直接从文件使用续期码: {code[:20]}***", flush=True)
         else:
-            # 2. 文件没有，则轮询 Telegram
             print("  [CODE] 文件无续期码，开始等待 @HaxTG_bot 发送...", flush=True)
             all_bots = []
             seen = set()
@@ -978,7 +1077,7 @@ def renew_account(account):
                 raise RuntimeError("未获取到续期码")
             step_screenshot("17_code_received", f"收到续期码 (来源:{source})")
 
-        # 3. 使用原始 Base64（不解码）
+        # 3. 使用原始 Base64
         print(f"  [CODE] 使用原始码: {code[:20]}***", flush=True)
         renewal_code_to_input = code
 
@@ -1022,7 +1121,7 @@ def renew_account(account):
             print("  [CAPTCHA] 算术验证码识别失败，跳过", flush=True)
         step_screenshot("21_after_arithmetic_captcha", "算术验证码后")
 
-        # 填入续期码（直接使用原始 Base64）
+        # 填入续期码
         debug_print("填入续期码")
         vcode_input = None
         for selector in ["css:input.form-control:not(#captcha)", "css:input[name=code]", "css:input#code"]:
@@ -1060,10 +1159,9 @@ def renew_account(account):
         # ---------- 提交续期 ----------
         debug_print("提交续期")
         print("  [SUBMIT] 提交续期...", flush=True)
-        close_ads(page)  # 先关闭可能遮挡的广告
+        close_ads(page)
         step_screenshot("24_before_submit", "提交前")
 
-        # 查找提交按钮
         submit_btn = None
         for selector in [
             "css:button[name=submit_button]",
@@ -1094,11 +1192,9 @@ def renew_account(account):
 
         # ---------- 检查结果 ----------
         debug_print("检查续期结果")
-        # 多次关闭广告，确保弹窗被清除
         for _ in range(3):
             close_ads(page)
             time.sleep(1)
-        # 额外使用 JS 移除所有可能的遮挡
         page.run_js("""
             document.querySelectorAll('.overlay, .modal, .popup, [class*="overlay"], [class*="modal"], [class*="popup"]')
                 .forEach(el => el.remove());
@@ -1166,7 +1262,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (全流程截图调试版)", flush=True)
+    print("   HAX 自动续期 (最终版 - Turnstile修复)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
