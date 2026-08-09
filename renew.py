@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (最终修正版 - 续期码文件读写)
+HAX VPS Auto-Renewal (最终修正版 - 全流程截图调试)
 """
 import os
 import sys
@@ -116,6 +116,8 @@ def send_telegram_photo(photo_path, caption, bot_token, chat_id):
         return False
 
 def take_screenshot(page, path, bot_token, chat_id, caption):
+    if not SEND_SCREENSHOTS:
+        return False
     try:
         debug_print(f"尝试截图: {path}")
         driver = None
@@ -151,8 +153,10 @@ def take_screenshot(page, path, bot_token, chat_id, caption):
                     raise
         if os.path.exists(path):
             send_telegram_photo(path, caption, bot_token, chat_id)
+            return True
     except Exception as e:
         print(f"  [截图] 失败: {e}", flush=True)
+    return False
 
 def notify_success(phone, expiry, bot_token, chat_id):
     msg = f"✅ <b>VPS 续期成功</b>\n\nHAX\n📱 {phone}\n📅 {expiry or '未知'}\n⏰ {get_beijing_time()}"
@@ -697,7 +701,6 @@ def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id, 
                             match = TG_RENEWAL_PATTERN.search(text)
                             if match:
                                 code = match.group(0)
-                                # 写入文件
                                 write_code_to_file(code)
                                 return code, bt.get("label", bt['token'][-6:])
             except Exception:
@@ -713,20 +716,28 @@ def close_ads(page):
     """按照本地脚本方式关闭广告，并额外用 JS 移除遮挡元素"""
     print("  [AD] 等待并关闭广告...")
     page.wait(3)
+    # 尝试 ESC
     try:
         page.actions.press(Keys.ESCAPE).perform()
         page.wait(1)
+        print("  [AD] 已按 ESC")
     except Exception:
         pass
+    # 尝试文本按钮
+    closed = False
     for keyword in ["Close", "close", "×", "关闭"]:
         try:
             el = page.ele(f'xpath://*[contains(text(), "{keyword}")]')
             if el and el.is_displayed:
                 el.click_self()
                 page.wait(1)
+                print(f"  [AD] 点击了 '{keyword}' 按钮")
+                closed = True
                 break
         except Exception:
             pass
+    if not closed:
+        print("  [AD] 未找到文本关闭按钮")
     page.wait(3)
     
     # 额外通过 JS 移除常见弹窗元素
@@ -752,8 +763,10 @@ def close_ads(page):
     try:
         page.run_js(js_remove)
         time.sleep(1)
+        print("  [AD] 已执行 JS 移除弹窗")
     except Exception as e:
         debug_print(f"JS移除弹窗失败: {e}")
+        print("  [AD] JS移除弹窗失败")
 
 # ===================== 处理 Consent 弹窗 =====================
 def handle_consent(page):
@@ -773,6 +786,7 @@ def handle_consent(page):
             print("  [Consent] 点击 Consent 按钮", flush=True)
             page.wait(2)
             return True
+        print("  [Consent] 未找到 Consent 按钮")
         return False
     except Exception as e:
         debug_print(f"处理 Consent 失败: {e}")
@@ -804,6 +818,17 @@ def renew_account(account):
         print("🔗 代理不可用，使用直连", flush=True)
 
     page = None
+    # 定义本地截图函数，自动带上手机号和时间
+    def step_screenshot(step_name, caption_extra=""):
+        try:
+            timestamp = datetime.now().strftime("%H%M%S")
+            fname = f"step_{step_name}_{phone}_{timestamp}.png"
+            caption = f"[{step_name}] {phone} {caption_extra}"
+            return take_screenshot(page, fname, bot_token, chat_id, caption)
+        except Exception as e:
+            debug_print(f"步骤截图失败 {step_name}: {e}")
+            return False
+
     try:
         debug_print("准备启动浏览器...")
         launch_args = {"headless": HEADLESS, "window_size": (1366, 768)}
@@ -815,6 +840,7 @@ def renew_account(account):
         page.get("https://hax.co.id/login")
         page.wait.doc_loaded(timeout=20)
         page.wait(5)
+        step_screenshot("01_after_login_page", "登录页加载完毕")
 
         # ---------- 尝试 Cookie 登录 ----------
         login_success = False
@@ -828,22 +854,20 @@ def renew_account(account):
             page.wait.doc_loaded(timeout=15)
             page.get("https://hax.co.id/vps-info")  # 强制刷新
             page.wait.doc_loaded(timeout=10)
+            step_screenshot("02_after_cookie_set", "Cookie登录尝试")
             if is_logged_in(page):
                 print("  ✅ Cookie 登录成功", flush=True)
                 login_success = True
             else:
                 print("  ⚠️ Cookie 未生效，将执行 OAuth", flush=True)
-                try:
-                    take_screenshot(page, f"cookie_fail_{phone}.png", bot_token, chat_id,
-                                    f"❌ Cookie 登录失败 - {phone}")
-                except:
-                    pass
+                step_screenshot("02_cookie_failed", "Cookie登录失败")
 
         if not login_success:
             debug_print("Cookie 登录失败，执行 OAuth")
             print("  [LOGIN] 执行 Telegram OAuth 登录...", flush=True)
             login_success = login_with_telegram_original(page, phone)
             if not login_success:
+                step_screenshot("03_oauth_failed", "OAuth登录失败")
                 raise RuntimeError("Telegram 登录失败")
 
         # 再次确认登录
@@ -854,19 +878,16 @@ def renew_account(account):
             if is_logged_in(page):
                 print("  ✅ 重新加载后确认登录", flush=True)
             else:
+                step_screenshot("04_login_confirm_failed", "登录状态确认失败")
                 raise RuntimeError("无法确认登录状态")
 
         print("  ✅ 登录成功，开始续期流程", flush=True)
+        step_screenshot("05_login_success", "登录成功")
 
-        # ----- 1. 处理 Consent 和广告 -----
+        # ----- 处理 Consent 和广告 -----
         handle_consent(page)
         close_ads(page)
-
-        # 登录成功截图
-        try:
-            take_screenshot(page, f"login_success_{phone}.png", bot_token, chat_id, f"✅ 登录成功 - {phone}")
-        except Exception as e:
-            print(f"  [截图] 登录截图失败: {e}", flush=True)
+        step_screenshot("06_after_consent_ad", "处理Consent和广告后")
 
         # ---------- 导航到续期 ----------
         debug_print("导航到 VPS 续期")
@@ -880,16 +901,20 @@ def renew_account(account):
                 pass
             page.wait(2)
         if not vps_menu:
+            step_screenshot("07_vps_menu_not_found", "未找到VPS下拉菜单")
             raise RuntimeError("未找到 VPS 下拉菜单")
         vps_menu.click_self()
         page.wait(2)
+        step_screenshot("08_vps_menu_clicked", "点击VPS下拉菜单")
 
         renew_btn = page.ele('css:a.dropdown-item[href="/vps-renew/"]')
         if not renew_btn:
+            step_screenshot("09_renew_btn_not_found", "未找到 Renew 按钮")
             raise RuntimeError("未找到 VPS Renew 按钮")
         renew_btn.click_self(by_js=True)
         print("  [NAV] 点击 VPS Renew", flush=True)
         page.wait(5)
+        step_screenshot("10_renew_page_loaded", "进入 /vps-renew 页面")
 
         # ---------- 填写表单 ----------
         debug_print("填写续期表单")
@@ -897,28 +922,32 @@ def renew_account(account):
         if web_input:
             web_input.input("hax.co.id", clear=True)
             print("  [FORM] 输入域名", flush=True)
+        else:
+            print("  [FORM] 未找到 web_address 输入框", flush=True)
         agreement = page.ele('css:input[name="agreement"][value="yes"]')
         if agreement and not agreement.is_checked:
             agreement.click_self(by_js=True)
             print("  [FORM] 勾选协议", flush=True)
+        else:
+            print("  [FORM] 协议已勾选或未找到", flush=True)
+        step_screenshot("11_form_filled", "表单填写完成")
 
         print("  [CF] 等待 CloudFlare 验证 (60s)...", flush=True)
         page.wait(60)
+        step_screenshot("12_after_cf_wait", "等待CF验证后")
 
         renew_vps_btn = page.ele("css:button[name=submit_button][type=button].btn-primary")
         if not renew_vps_btn:
+            step_screenshot("13_renew_vps_btn_not_found", "未找到 Renew VPS 按钮")
             raise RuntimeError("未找到 Renew VPS 按钮")
         renew_vps_btn.click_self(by_js=True)
         print("  [FORM] 点击 Renew VPS", flush=True)
         page.wait(5)
+        step_screenshot("14_after_renew_vps_click", "已点击 Renew VPS")
 
-        # ----- 2. 点击 Renew VPS 后关闭广告 -----
+        # ----- 关闭广告 -----
         close_ads(page)
-
-        try:
-            take_screenshot(page, f"renew_vps_{phone}.png", bot_token, chat_id, f"🔄 已点击 Renew VPS - {phone}")
-        except Exception as e:
-            print(f"  [截图] Renew VPS 截图失败: {e}", flush=True)
+        step_screenshot("15_after_renew_vps_ad", "Renew VPS 后关闭广告")
 
         # ---------- 获取续期码（先读文件，若无则轮询） ----------
         debug_print("开始获取续期码")
@@ -945,12 +974,9 @@ def renew_account(account):
                 timeout=1800, poll_interval=10
             )
             if not code:
-                try:
-                    take_screenshot(page, f"timeout_{phone}.png", bot_token, chat_id,
-                                    f"⏰ 续期码超时 - {phone}\n请检查 HaxTG_bot")
-                except:
-                    pass
+                step_screenshot("16_code_timeout", "续期码超时")
                 raise RuntimeError("未获取到续期码")
+            step_screenshot("17_code_received", f"收到续期码 (来源:{source})")
 
         # 3. 使用原始 Base64（不解码）
         print(f"  [CODE] 使用原始码: {code[:20]}***", flush=True)
@@ -971,14 +997,17 @@ def renew_account(account):
             except Exception:
                 pass
         if not renew_code_link:
+            step_screenshot("18_renew_code_link_not_found", "未找到 INPUT RENEW CODE 按钮")
             raise RuntimeError("未找到 INPUT RENEW CODE 按钮")
         renew_code_link.click_self(by_js=True)
         print("  [NAV] 点击 INPUT RENEW CODE", flush=True)
         page.wait.doc_loaded(timeout=15)
         page.wait(3)
+        step_screenshot("19_renew_code_page_loaded", "进入续期码输入页")
 
-        # ----- 3. 进入续期码页后关闭广告 -----
+        # ----- 关闭广告 -----
         close_ads(page)
+        step_screenshot("20_after_renew_code_ad", "续期码页关闭广告后")
 
         # ---------- 算术验证码 ----------
         captcha_result = solve_arithmetic_captcha(page)
@@ -987,6 +1016,11 @@ def renew_account(account):
             if code_input:
                 code_input.input(str(captcha_result), clear=True)
                 print(f"  [CAPTCHA] 输入结果: {captcha_result}", flush=True)
+            else:
+                print("  [CAPTCHA] 未找到算术验证码输入框", flush=True)
+        else:
+            print("  [CAPTCHA] 算术验证码识别失败，跳过", flush=True)
+        step_screenshot("21_after_arithmetic_captcha", "算术验证码后")
 
         # 填入续期码（直接使用原始 Base64）
         debug_print("填入续期码")
@@ -1008,6 +1042,9 @@ def renew_account(account):
                 pass
             vcode_input.input(renewal_code_to_input, clear=True)
             print(f"  [CODE] 输入 renewal code (原始Base64): {renewal_code_to_input[:20]}***", flush=True)
+        else:
+            print("  [CODE] 未找到续期码输入框", flush=True)
+        step_screenshot("22_after_code_input", "续期码填入后")
 
         # ---------- reCAPTCHA ----------
         debug_print("开始 reCAPTCHA")
@@ -1018,18 +1055,13 @@ def renew_account(account):
             print("  [reCAPTCHA] 请在浏览器中手动完成验证（60秒）", flush=True)
             page.wait(60)
             recaptcha_solved = is_recaptcha_solved(page)
+        step_screenshot("23_after_recaptcha", f"reCAPTCHA 状态: {'成功' if recaptcha_solved else '失败'}")
 
-        # ---------- 提交续期（增加提交前截图） ----------
+        # ---------- 提交续期 ----------
         debug_print("提交续期")
         print("  [SUBMIT] 提交续期...", flush=True)
         close_ads(page)  # 先关闭可能遮挡的广告
-
-        # 在点击提交按钮之前截图，记录表单状态
-        try:
-            take_screenshot(page, f"before_submit_{phone}.png", bot_token, chat_id,
-                            f"📝 提交前截图 - {phone} (已填好续期码和reCAPTCHA)")
-        except Exception as e:
-            print(f"  [截图] 提交前截图失败: {e}", flush=True)
+        step_screenshot("24_before_submit", "提交前")
 
         # 查找提交按钮
         submit_btn = None
@@ -1050,6 +1082,7 @@ def renew_account(account):
             all_btns = page.eles("css:button")
             for btn in all_btns:
                 print(f"    button: name={btn.attr('name')} class={btn.attr('class')} text={btn.text.strip()[:50]}", flush=True)
+            step_screenshot("25_submit_btn_not_found", "未找到提交按钮")
             raise RuntimeError("未找到提交按钮")
         try:
             submit_btn.click_self(by_js=True)
@@ -1057,8 +1090,9 @@ def renew_account(account):
             submit_btn.click_self()
         print("  [SUBMIT] 已点击提交，等待结果...", flush=True)
         time.sleep(60)
+        step_screenshot("26_after_submit_wait", "提交后等待60秒")
 
-        # ---------- 检查结果（增强弹窗清理） ----------
+        # ---------- 检查结果 ----------
         debug_print("检查续期结果")
         # 多次关闭广告，确保弹窗被清除
         for _ in range(3):
@@ -1072,7 +1106,6 @@ def renew_account(account):
         time.sleep(2)
         page.wait.doc_loaded(timeout=15)
         page.wait(3)
-        # 再次关闭一次
         close_ads(page)
         result_text = page.run_js("document.body.innerText") or ""
         result_lower = result_text.lower()
@@ -1100,15 +1133,10 @@ def renew_account(account):
                     expiry_date = m.group(1)
                     print(f"  [RESULT] 到期日: {expiry_date}", flush=True)
                     break
+        else:
+            print(f"  [RESULT] 未检测到明确成功关键字，页面片段: {result_text[:200]}...", flush=True)
 
-        try:
-            result_png = f"result_{phone}.png"
-            status = "成功" if is_success else "失败"
-            caption = f"{'✅' if is_success else '❌'} {status} - {phone}\n到期日: {expiry_date or '未知'}"
-            take_screenshot(page, result_png, bot_token, chat_id, caption)
-        except Exception as e:
-            print(f"  [截图] 结果截图失败: {e}", flush=True)
-
+        step_screenshot("27_result_page", f"结果页 - {'成功' if is_success else '失败'}")
         if is_success:
             notify_success(phone, expiry_date or "未知日期", bot_token, chat_id)
             return True
@@ -1138,7 +1166,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (最终修正版 - 文件读写)", flush=True)
+    print("   HAX 自动续期 (全流程截图调试版)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
