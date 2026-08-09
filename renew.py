@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (最终版 - 修复 launch 参数)
+HAX VPS Auto-Renewal (最终版 - 精确 Turnstile 检测)
 """
 import os
 import sys
@@ -293,45 +293,94 @@ def set_session_cookie(page, session_token):
         debug_print(f"JS 注入失败: {e}")
     return False
 
-# ===================== Turnstile 处理 =====================
+# ===================== 精确 Turnstile 处理 =====================
 def handle_turnstile(page, timeout=120):
+    """
+    精确检测 CloudFlare Turnstile 验证是否真正通过。
+    返回 True 表示成功，False 表示失败或超时。
+    """
     start = time.time()
     while time.time() - start < timeout:
+        # ----- 1. 检查 textarea 中的 token（最可靠） -----
         token = page.run_js("""
             (() => {
                 const el = document.querySelector('textarea[name="cf-turnstile-response"]');
                 return el ? el.value : '';
             })()
         """)
-        if token and len(token) > 20:
-            print("  [Turnstile] 验证通过（已获取 token）")
+        # 有效的 Turnstile token 是 Base64 编码，长度一般 > 50，且不含空格
+        if token and len(token) > 50 and re.match(r'^[A-Za-z0-9+/=]+$', token):
+            print("  [Turnstile] 验证通过（token 有效）")
             return True
 
-        iframe = page.ele("css:iframe[src*='challenges.cloudflare.com']", timeout=1)
-        if not iframe:
-            web_input = page.ele("css:#web_address", timeout=1)
-            if web_input and web_input.is_displayed:
-                print("  [Turnstile] 挑战框消失，表单可见，视为通过")
-                return True
+        # ----- 2. 调用 Turnstile 官方 API 获取 token -----
+        api_token = page.run_js("""
+            (() => {
+                try {
+                    if (typeof turnstile !== 'undefined' && turnstile.getResponse) {
+                        return turnstile.getResponse();
+                    }
+                    return '';
+                } catch(e) {
+                    return '';
+                }
+            })()
+        """)
+        if api_token and len(api_token) > 50:
+            print("  [Turnstile] 验证通过（turnstile.getResponse 成功）")
+            return True
 
-        try:
-            checkbox = page.ele("css:.cf-turnstile iframe", timeout=2)
-            if checkbox:
-                with page.with_frame(checkbox) as frame:
-                    chk = frame.ele("css:input[type='checkbox']", timeout=2)
-                    if chk and not chk.is_checked:
-                        chk.click()
-                        print("  [Turnstile] 点击复选框")
-                        time.sleep(2)
-                        continue
-        except:
-            pass
+        # ----- 3. 检测错误状态 -----
+        error_indicators = [
+            ".turnstile-error",
+            "[aria-invalid='true']",
+            ".error",
+            ".has-error",
+            '[class*="error"]',
+        ]
+        has_error = False
+        for sel in error_indicators:
+            try:
+                el = page.ele(f"css:{sel}", timeout=1)
+                if el and el.is_displayed:
+                    has_error = True
+                    break
+            except:
+                pass
+        if has_error:
+            print("  [Turnstile] 检测到错误指示元素")
+            return False
 
+        # 检测错误文本
         body = page.run_js("document.body.innerText") or ""
-        if "验证失败" in body or "challenge failed" in body.lower():
+        if "验证失败" in body or "challenge failed" in body.lower() or "try again" in body.lower():
             print("  [Turnstile] 页面提示验证失败")
             return False
 
+        # ----- 4. 检测挑战框是否消失，并检查提交按钮是否可用 -----
+        iframe = page.ele("css:iframe[src*='challenges.cloudflare.com']", timeout=1)
+        if not iframe:
+            # 挑战框消失，但需确保表单元素存在且按钮可用（非 disabled）
+            submit_btn = page.ele("css:button[name=submit_button][type=button].btn-primary", timeout=1)
+            if submit_btn and submit_btn.is_displayed and not submit_btn.attr("disabled"):
+                # 但还要确认是否有 token（可能已经通过但未填充 textarea？再检查一次）
+                token2 = page.run_js("""
+                    (() => {
+                        const el = document.querySelector('textarea[name="cf-turnstile-response"]');
+                        return el ? el.value : '';
+                    })()
+                """)
+                if token2 and len(token2) > 20:
+                    print("  [Turnstile] 挑战框消失，按钮可用，且有 token，视为通过")
+                    return True
+                else:
+                    # 可能验证失败，但按钮仍可用？保守起见继续等待
+                    print("  [Turnstile] 挑战框消失但 token 为空，可能失败，继续等待")
+            else:
+                # 按钮不可用，可能验证未完成
+                print("  [Turnstile] 挑战框消失但提交按钮不可用，继续等待")
+
+        # ----- 5. 每 10 秒打印一次进度 -----
         elapsed = int(time.time() - start)
         if elapsed % 10 == 0 and elapsed > 0:
             print(f"  [Turnstile] 等待中... {elapsed}s")
@@ -865,7 +914,6 @@ def renew_account(account):
 
     try:
         debug_print("准备启动浏览器...")
-        # ========== 修正后的 launch_args ==========
         launch_args = {
             "headless": HEADLESS,
             "proxy": PROXY_ADDR if proxies else None,
@@ -894,7 +942,7 @@ def renew_account(account):
             debug_print("Cookie 设置完成，跳转 vps-info")
             page.get("https://hax.co.id/vps-info")
             page.wait.doc_loaded(timeout=15)
-            page.get("https://hax.co.id/vps-info")  # 强制刷新
+            page.get("https://hax.co.id/vps-info")
             page.wait.doc_loaded(timeout=10)
             step_screenshot("02_after_cookie_set", "Cookie登录尝试")
             if is_logged_in(page):
@@ -912,7 +960,6 @@ def renew_account(account):
                 step_screenshot("03_oauth_failed", "OAuth登录失败")
                 raise RuntimeError("Telegram 登录失败")
 
-        # 再次确认登录
         if not is_logged_in(page):
             print("  ⚠️ 登录后未检测到登录状态，重新加载...", flush=True)
             page.get("https://hax.co.id/vps-info")
@@ -926,12 +973,10 @@ def renew_account(account):
         print("  ✅ 登录成功，开始续期流程", flush=True)
         step_screenshot("05_login_success", "登录成功")
 
-        # ----- 处理 Consent 和广告 -----
         handle_consent(page)
         close_ads(page)
         step_screenshot("06_after_consent_ad", "处理Consent和广告后")
 
-        # ---------- 导航到续期 ----------
         debug_print("导航到 VPS 续期")
         vps_menu = None
         for _ in range(5):
@@ -958,7 +1003,6 @@ def renew_account(account):
         page.wait(5)
         step_screenshot("10_renew_page_loaded", "进入 /vps-renew 页面")
 
-        # ---------- 填写表单 ----------
         debug_print("填写续期表单")
         web_input = page.ele("css:#web_address")
         if web_input:
@@ -1018,11 +1062,9 @@ def renew_account(account):
         page.wait(5)
         step_screenshot("14_after_renew_vps_click", "已点击 Renew VPS")
 
-        # ----- 关闭广告 -----
         close_ads(page)
         step_screenshot("15_after_renew_vps_ad", "Renew VPS 后关闭广告")
 
-        # ---------- 获取续期码 ----------
         debug_print("开始获取续期码")
         code = read_code_from_file()
         source = "file"
@@ -1052,7 +1094,6 @@ def renew_account(account):
         print(f"  [CODE] 使用原始码: {code[:20]}***", flush=True)
         renewal_code_to_input = code
 
-        # ---------- 进入续期码输入页 ----------
         debug_print("进入续期码输入页")
         renew_code_link = None
         for selector in [
@@ -1075,11 +1116,9 @@ def renew_account(account):
         page.wait(3)
         step_screenshot("19_renew_code_page_loaded", "进入续期码输入页")
 
-        # ----- 关闭广告 -----
         close_ads(page)
         step_screenshot("20_after_renew_code_ad", "续期码页关闭广告后")
 
-        # ---------- 算术验证码 ----------
         captcha_result = solve_arithmetic_captcha(page)
         if captcha_result is not None:
             code_input = page.ele("css:#captcha")
@@ -1092,7 +1131,6 @@ def renew_account(account):
             print("  [CAPTCHA] 算术验证码识别失败，跳过", flush=True)
         step_screenshot("21_after_arithmetic_captcha", "算术验证码后")
 
-        # 填入续期码
         debug_print("填入续期码")
         vcode_input = None
         for selector in ["css:input.form-control:not(#captcha)", "css:input[name=code]", "css:input#code"]:
@@ -1116,7 +1154,6 @@ def renew_account(account):
             print("  [CODE] 未找到续期码输入框", flush=True)
         step_screenshot("22_after_code_input", "续期码填入后")
 
-        # ---------- reCAPTCHA ----------
         debug_print("开始 reCAPTCHA")
         print("  [reCAPTCHA] 处理音频验证...", flush=True)
         recaptcha_solved = solve_recaptcha(page, timeout=90)
@@ -1127,7 +1164,6 @@ def renew_account(account):
             recaptcha_solved = is_recaptcha_solved(page)
         step_screenshot("23_after_recaptcha", f"reCAPTCHA 状态: {'成功' if recaptcha_solved else '失败'}")
 
-        # ---------- 提交续期 ----------
         debug_print("提交续期")
         print("  [SUBMIT] 提交续期...", flush=True)
         close_ads(page)
@@ -1161,7 +1197,6 @@ def renew_account(account):
         time.sleep(60)
         step_screenshot("26_after_submit_wait", "提交后等待60秒")
 
-        # ---------- 检查结果 ----------
         debug_print("检查续期结果")
         for _ in range(3):
             close_ads(page)
@@ -1233,7 +1268,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (最终版 - Turnstile修复)", flush=True)
+    print("   HAX 自动续期 (精确 Turnstile 检测)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
