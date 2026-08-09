@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (最终版 - 修复 Turnstile 验证)
+HAX VPS Auto-Renewal (最终版 - 修复 launch 参数)
 """
 import os
 import sys
@@ -293,15 +293,10 @@ def set_session_cookie(page, session_token):
         debug_print(f"JS 注入失败: {e}")
     return False
 
-# ===================== Turnstile 处理（新增） =====================
+# ===================== Turnstile 处理 =====================
 def handle_turnstile(page, timeout=120):
-    """
-    处理 CloudFlare Turnstile 验证。
-    返回 True 表示成功，False 表示失败或超时。
-    """
     start = time.time()
     while time.time() - start < timeout:
-        # 1. 检测是否已有 token（验证通过）
         token = page.run_js("""
             (() => {
                 const el = document.querySelector('textarea[name="cf-turnstile-response"]');
@@ -312,16 +307,13 @@ def handle_turnstile(page, timeout=120):
             print("  [Turnstile] 验证通过（已获取 token）")
             return True
 
-        # 2. 检测挑战框是否消失
         iframe = page.ele("css:iframe[src*='challenges.cloudflare.com']", timeout=1)
         if not iframe:
-            # 可能验证通过，检查表单是否可见
             web_input = page.ele("css:#web_address", timeout=1)
             if web_input and web_input.is_displayed:
                 print("  [Turnstile] 挑战框消失，表单可见，视为通过")
                 return True
 
-        # 3. 尝试点击 Turnstile 复选框（某些版本）
         try:
             checkbox = page.ele("css:.cf-turnstile iframe", timeout=2)
             if checkbox:
@@ -335,13 +327,11 @@ def handle_turnstile(page, timeout=120):
         except:
             pass
 
-        # 4. 检测是否出现验证失败提示
         body = page.run_js("document.body.innerText") or ""
         if "验证失败" in body or "challenge failed" in body.lower():
             print("  [Turnstile] 页面提示验证失败")
             return False
 
-        # 5. 进度提示
         elapsed = int(time.time() - start)
         if elapsed % 10 == 0 and elapsed > 0:
             print(f"  [Turnstile] 等待中... {elapsed}s")
@@ -351,7 +341,7 @@ def handle_turnstile(page, timeout=120):
     print("  [Turnstile] 超时")
     return False
 
-# ===================== reCAPTCHA 音频求解（原有） =====================
+# ===================== reCAPTCHA 音频求解 =====================
 def find_frame(page, keyword):
     try:
         frames = page.get_frames()
@@ -875,13 +865,12 @@ def renew_account(account):
 
     try:
         debug_print("准备启动浏览器...")
-        # 优化启动参数，规避自动化检测
+        # ========== 修正后的 launch_args ==========
         launch_args = {
             "headless": HEADLESS,
-            "window_size": (1366, 768),
             "proxy": PROXY_ADDR if proxies else None,
-            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "arguments": [
+                "--window-size=1366,768",
                 "--disable-blink-features=AutomationControlled",
                 "--disable-features=ChromeWhatsNewUI",
                 "--disable-infobars",
@@ -890,6 +879,7 @@ def renew_account(account):
                 "--disable-site-isolation-trials",
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
+                "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             ],
             "experimental_options": {
                 "excludeSwitches": ["enable-automation"],
@@ -999,13 +989,13 @@ def renew_account(account):
             print("  [FORM] 协议已勾选或未找到", flush=True)
         step_screenshot("11_form_filled", "表单填写完成")
 
-        # ========== 关键改进：处理 Turnstile 验证 ==========
+        # ========== 处理 Turnstile 验证 ==========
         print("  [Turnstile] 等待 CloudFlare Turnstile 验证...", flush=True)
         if not handle_turnstile(page, timeout=120):
             print("  [Turnstile] 首次验证失败，刷新页面重试...")
             page.get("https://hax.co.id/vps-renew")
             page.wait.doc_loaded(timeout=15)
-            # 重新填写表单（可能因刷新丢失）
+            # 重新填写表单
             web_input = page.ele("css:#web_address", timeout=5)
             if web_input:
                 web_input.input("hax.co.id", clear=True)
@@ -1013,10 +1003,8 @@ def renew_account(account):
             if agreement and not agreement.is_checked:
                 agreement.click_self(by_js=True)
             if not handle_turnstile(page, timeout=90):
-                # 若再次失败，尝试强制点击复选框（可能隐藏）
                 print("  [Turnstile] 再次失败，尝试强制点击...")
                 try:
-                    # 尝试通过 JS 触发 Turnstile 渲染回调
                     page.run_js("""
                         if (typeof turnstile !== 'undefined') {
                             turnstile.render(document.querySelector('.cf-turnstile'), {
@@ -1031,7 +1019,6 @@ def renew_account(account):
                     time.sleep(5)
                 except:
                     pass
-                # 最后等待并检测
                 if not handle_turnstile(page, timeout=60):
                     raise RuntimeError("CloudFlare Turnstile 验证无法自动通过，请检查代理或手动处理")
         step_screenshot("12_after_turnstile", "Turnstile验证完成")
@@ -1077,7 +1064,6 @@ def renew_account(account):
                 raise RuntimeError("未获取到续期码")
             step_screenshot("17_code_received", f"收到续期码 (来源:{source})")
 
-        # 3. 使用原始 Base64
         print(f"  [CODE] 使用原始码: {code[:20]}***", flush=True)
         renewal_code_to_input = code
 
