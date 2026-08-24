@@ -834,7 +834,7 @@ def renew_account(account):
             else:
                 print("  ⚠️ Cookie 未生效，将执行 OAuth", flush=True)
                 # try:
-                #     take_screenshot(page, f"cookie_fail_{phone}.png", bot_token, chat_id,
+                #   take_screenshot(page, f"cookie_fail_{phone}.png", bot_token, chat_id,
                 #                   f"❌ Cookie 登录失败 - {phone}")
                 # except:
                 #    pass
@@ -1029,7 +1029,7 @@ def renew_account(account):
         #    take_screenshot(page, f"before_submit_{phone}.png", bot_token, chat_id,
         #                   f"📝 提交前截图 - {phone} (已填好续期码和reCAPTCHA)")
         # except Exception as e:
-        #    print(f"  [截图] 提交前截图失败: {e}", flush=True)
+        #   print(f"  [截图] 提交前截图失败: {e}", flush=True)
 
         # 查找提交按钮
         submit_btn = None
