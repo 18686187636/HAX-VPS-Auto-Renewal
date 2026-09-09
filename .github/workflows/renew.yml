@@ -166,10 +166,8 @@ jobs:
 
       - name: Start forwarders and run renewal
         env:
-          # 共用的 API 凭据（若三个账号使用同一应用，可共用；否则分别配置）
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
-          # 续期脚本配置
           ACCOUNTS_JSON: ${{ secrets.ACCOUNTS_JSON }}
           HEADLESS: "true"
           PROXY_SERVER: ${{ secrets.NODE_LINK != '' && 'http://127.0.0.1:1081' || '' }}
@@ -195,14 +193,33 @@ jobs:
           python3 forwarder.py &
           PID3=$!
 
-          echo "🚀 三个转发器已启动 (PIDs: $PID1, $PID2, $PID3)"
+          # --- 新增 账号4 ~ 6 ---
+          SESSION_STRING=${{ secrets.SESSION_STRING_4 }} \
+          TARGET_BOT_TOKEN=${{ secrets.BOT_TOKEN_4 }} \
+          TARGET_CHAT_ID=${{ secrets.CHAT_ID_4 }} \
+          python3 forwarder.py &
+          PID4=$!
+
+          SESSION_STRING=${{ secrets.SESSION_STRING_5 }} \
+          TARGET_BOT_TOKEN=${{ secrets.BOT_TOKEN_5 }} \
+          TARGET_CHAT_ID=${{ secrets.CHAT_ID_5 }} \
+          python3 forwarder.py &
+          PID5=$!
+
+          SESSION_STRING=${{ secrets.SESSION_STRING_6 }} \
+          TARGET_BOT_TOKEN=${{ secrets.BOT_TOKEN_6 }} \
+          TARGET_CHAT_ID=${{ secrets.CHAT_ID_6 }} \
+          python3 forwarder.py &
+          PID6=$!
+
+          echo "🚀 六个转发器已启动 (PIDs: $PID1, $PID2, $PID3, $PID4, $PID5, $PID6)"
           sleep 8  # 等待转发器初始化
 
           # 运行续期脚本
           xvfb-run --auto-servernum python3 renew.py
 
-          # 清理
-          kill $PID1 $PID2 $PID3 2>/dev/null || true
+          # 清理所有转发器进程
+          kill $PID1 $PID2 $PID3 $PID4 $PID5 $PID6 2>/dev/null || true
 
       - name: Upload screenshots
         if: always()
