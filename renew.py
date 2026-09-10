@@ -2,6 +2,10 @@
 # -*- coding: utf-8 -*-
 """
 HAX VPS Auto-Renewal (最终修正版 - 续期码文件读写)
+- 每个账号完成后 TG 通知剩余未完成列表
+- 全部完成后 TG 通知「今日 hax 续期全部完成」
+- 登录后检测到期时间，剩余 > 72h 则跳过
+- 失败账号自动重试，最多 5 轮
 """
 import os
 import sys
@@ -35,6 +39,12 @@ CODE_FILE = "renewal_code.txt"
 TG_RENEWAL_PATTERN = re.compile(r'[A-Za-z0-9+/=]{32,}')
 DEBUG = os.getenv("DEBUG", "true").lower() == "true"
 SEND_SCREENSHOTS = os.getenv("SEND_SCREENSHOTS", "true").lower() == "true"
+# 进度通知开关（每个账号完成后推送）
+NOTIFY_PROGRESS = os.getenv("NOTIFY_PROGRESS", "true").lower() == "true"
+# 剩余时间超过该阈值（小时）则视为"已续期"，直接跳过
+SKIP_THRESHOLD_HOURS = float(os.getenv("SKIP_THRESHOLD_HOURS", "72"))
+# 失败账号最大重试轮数
+MAX_RENEW_ROUNDS = int(os.getenv("MAX_RENEW_ROUNDS", "5"))
 
 def debug_print(*args, **kwargs):
     if DEBUG:
@@ -161,6 +171,147 @@ def notify_success(phone, expiry, bot_token, chat_id):
 def notify_failed(phone, step, error, bot_token, chat_id):
     msg = f"❌ <b>VPS 续期失败</b>\n\nHAX\n📱 {phone}\n📍 {step}\n⚠️ {error}\n⏰ {get_beijing_time()}"
     send_telegram_message(msg, bot_token, chat_id)
+
+def notify_skipped(phone, valid_until, remaining_hours, bot_token, chat_id):
+    rh_str = f"{remaining_hours:.1f} 小时" if isinstance(remaining_hours, (int, float)) else "未知"
+    msg = (f"⏭️ <b>VPS 已续期，跳过</b>\n\nHAX\n📱 {phone}\n"
+           f"📅 到期: {valid_until or '未知'}\n"
+           f"⏰ 剩余: {rh_str}\n"
+           f"🕒 {get_beijing_time()}")
+    send_telegram_message(msg, bot_token, chat_id)
+
+def notify_progress(round_no, max_rounds, current_idx, total, phone,
+                    status_emoji, status_text, pending_list, bot_token, chat_id):
+    """每个账号处理完后，推送当前进度 + 未完成账号列表"""
+    if not bot_token or not chat_id:
+        return
+    lines = [f"{status_emoji} <b>HAX 进度 [第{round_no}/{max_rounds}轮] {current_idx}/{total}</b>",
+             "",
+             f"📱 刚完成: <code>{phone}</code>",
+             f"📌 结果: {status_text}",
+             ""]
+    if pending_list:
+        lines.append(f"⏳ <b>本轮未完成 ({len(pending_list)})：</b>")
+        for i, p in enumerate(pending_list, 1):
+            lines.append(f"  {i}. <code>{p}</code>")
+    else:
+        lines.append("🎉 <b>本轮所有账号已处理完毕</b>")
+    lines.append("")
+    lines.append(f"🕒 {get_beijing_time()}")
+    send_telegram_message("\n".join(lines), bot_token, chat_id)
+
+def notify_round_start(round_no, max_rounds, pending_accounts, bot_token, chat_id):
+    if not bot_token or not chat_id:
+        return
+    lines = [f"🔄 <b>HAX 第 {round_no}/{max_rounds} 轮开始</b>", ""]
+    lines.append(f"⏳ <b>待处理 ({len(pending_accounts)})：</b>")
+    for i, a in enumerate(pending_accounts, 1):
+        lines.append(f"  {i}. <code>{a.get('phone', '?')}</code>")
+    lines.append("")
+    lines.append(f"🕒 {get_beijing_time()}")
+    send_telegram_message("\n".join(lines), bot_token, chat_id)
+
+def notify_round_end(round_no, will_retry, pending_accounts, bot_token, chat_id):
+    if not bot_token or not chat_id:
+        return
+    lines = [f"📋 <b>HAX 第 {round_no} 轮结束</b>", ""]
+    if will_retry:
+        lines.append(f"⏳ 仍有 {len(pending_accounts)} 个账号未完成，将进入下一轮重试：")
+        for i, a in enumerate(pending_accounts, 1):
+            lines.append(f"  {i}. <code>{a.get('phone', '?')}</code>")
+    else:
+        lines.append("🎉 本轮全部处理完毕")
+    lines.append("")
+    lines.append(f"🕒 {get_beijing_time()}")
+    send_telegram_message("\n".join(lines), bot_token, chat_id)
+
+def notify_all_done(total, success, failed, skipped, failed_list, bot_token, chat_id):
+    """全部处理完后，推送总结"""
+    if not bot_token or not chat_id:
+        return
+    lines = [
+        "🎊 <b>今日 hax 续期全部完成</b>",
+        "",
+        f"📊 总数: {total}",
+        f"✅ 成功: {success}",
+        f"⏭️ 跳过: {skipped}",
+        f"❌ 失败: {failed}",
+    ]
+    if failed_list:
+        lines.append("")
+        lines.append("⚠️ <b>失败账号：</b>")
+        for i, p in enumerate(failed_list, 1):
+            lines.append(f"  {i}. <code>{p}</code>")
+    lines.append("")
+    lines.append(f"🕒 {get_beijing_time()}")
+    send_telegram_message("\n".join(lines), bot_token, chat_id)
+
+# ===================== 到期时间检测 =====================
+def get_page_field_value(page, label_text):
+    """从页面 label.col-form-label + 相邻值 div 中提取字段值"""
+    try:
+        js = """
+        (function(lbl) {
+            var labels = document.querySelectorAll('label.col-form-label, label');
+            for (var i = 0; i < labels.length; i++) {
+                var t = (labels[i].textContent || '').trim();
+                if (t.toLowerCase() === lbl.toLowerCase()) {
+                    var parent = labels[i].closest('.row') || labels[i].parentElement;
+                    if (parent) {
+                        var valDiv = parent.querySelector('.col-sm-7, .col-sm-6, .col-md-7, div');
+                        if (valDiv && valDiv !== labels[i]) {
+                            return (valDiv.textContent || '').trim();
+                        }
+                    }
+                }
+            }
+            return '';
+        })('%s');
+        """ % label_text.replace("'", "\\'")
+        return page.run_js(js) or ""
+    except Exception as e:
+        debug_print(f"get_page_field_value({label_text}) 异常: {e}")
+        return ""
+
+def parse_dt(s):
+    if not s:
+        return None
+    s = re.sub(r'\(.*?\)', '', s).strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
+                "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(s, fmt)
+        except:
+            continue
+    return None
+
+def check_should_renew(page):
+    """
+    检查 VPS 是否需要续期。
+    返回 (should_renew: bool, valid_until_str, remaining_hours)
+    """
+    valid_str = get_page_field_value(page, "Valid until")
+    current_str = get_page_field_value(page, "Current time")
+
+    if not valid_str:
+        debug_print("未找到 'Valid until' 字段，继续续期流程")
+        return True, None, None
+
+    valid_dt = parse_dt(valid_str)
+    if not valid_dt:
+        print(f"  [CHECK] ⚠️ 无法解析到期时间: {valid_str!r}，继续续期")
+        return True, valid_str, None
+
+    now_dt = parse_dt(current_str) or datetime.now()
+    remaining_hours = (valid_dt - now_dt).total_seconds() / 3600.0
+
+    print(f"  [CHECK] Valid until : {valid_str}", flush=True)
+    print(f"  [CHECK] Current time: {now_dt.strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
+    print(f"  [CHECK] 剩余: {remaining_hours:.2f} 小时 (阈值 {SKIP_THRESHOLD_HOURS} 小时)", flush=True)
+
+    if remaining_hours > SKIP_THRESHOLD_HOURS:
+        return False, valid_str, remaining_hours
+    return True, valid_str, remaining_hours
 
 # ===================== 续期码文件读写 =====================
 def read_code_from_file():
@@ -728,7 +879,7 @@ def close_ads(page):
         except Exception:
             pass
     page.wait(3)
-    
+
     # 额外通过 JS 移除常见弹窗元素
     js_remove = """
     (function() {
@@ -780,6 +931,12 @@ def handle_consent(page):
 
 # ===================== 单账号续期主流程 =====================
 def renew_account(account):
+    """
+    返回值：
+      ("success", {"expiry": ...})  — 续期成功
+      ("skipped", {"valid_until": ..., "remaining_hours": ...}) — 已续期跳过
+      ("failed",  {"step": ..., "error": ...}) — 失败
+    """
     phone = account.get("phone")
     session_token = account.get("session_token")
     bot_token = account.get("bot_token")
@@ -787,7 +944,7 @@ def renew_account(account):
 
     if not phone:
         print("  ⚠️ 账号缺少手机号，跳过", flush=True)
-        return False
+        return "failed", {"step": "参数校验", "error": "缺少手机号"}
 
     print(f"\n{'='*60}\n  续期: {phone}\n{'='*60}", flush=True)
 
@@ -833,11 +990,6 @@ def renew_account(account):
                 login_success = True
             else:
                 print("  ⚠️ Cookie 未生效，将执行 OAuth", flush=True)
-                # try:
-                #   take_screenshot(page, f"cookie_fail_{phone}.png", bot_token, chat_id,
-                #                   f"❌ Cookie 登录失败 - {phone}")
-                # except:
-                #    pass
 
         if not login_success:
             debug_print("Cookie 登录失败，执行 OAuth")
@@ -867,6 +1019,23 @@ def renew_account(account):
             take_screenshot(page, f"login_success_{phone}.png", bot_token, chat_id, f"✅ 登录成功 - {phone}")
         except Exception as e:
             print(f"  [截图] 登录截图失败: {e}", flush=True)
+
+        # ---------- 检测是否需要续期 ----------
+        # 确保在 vps-info 页面
+        if "hax.co.id/vps-info" not in (page.url or ""):
+            page.get("https://hax.co.id/vps-info")
+            page.wait.doc_loaded(timeout=15)
+        page.wait(2)
+        try:
+            should_renew, valid_until, remaining_hours = check_should_renew(page)
+        except Exception as e:
+            print(f"  [CHECK] 检查异常: {e}，继续续期", flush=True)
+            should_renew, valid_until, remaining_hours = True, None, None
+
+        if not should_renew:
+            print(f"  ⏭️ 已续期（剩余 {remaining_hours:.1f} 小时），跳过", flush=True)
+            notify_skipped(phone, valid_until, remaining_hours, bot_token, chat_id)
+            return "skipped", {"valid_until": valid_until, "remaining_hours": remaining_hours}
 
         # ---------- 导航到续期 ----------
         debug_print("导航到 VPS 续期")
@@ -1019,19 +1188,11 @@ def renew_account(account):
             page.wait(60)
             recaptcha_solved = is_recaptcha_solved(page)
 
-        # ---------- 提交续期（增加提交前截图） ----------
+        # ---------- 提交续期 ----------
         debug_print("提交续期")
         print("  [SUBMIT] 提交续期...", flush=True)
         close_ads(page)  # 先关闭可能遮挡的广告
 
-        # 在点击提交按钮之前截图，记录表单状态
-        # try:
-        #    take_screenshot(page, f"before_submit_{phone}.png", bot_token, chat_id,
-        #                   f"📝 提交前截图 - {phone} (已填好续期码和reCAPTCHA)")
-        # except Exception as e:
-        #   print(f"  [截图] 提交前截图失败: {e}", flush=True)
-
-        # 查找提交按钮
         submit_btn = None
         for selector in [
             "css:button[name=submit_button]",
@@ -1060,11 +1221,9 @@ def renew_account(account):
 
         # ---------- 检查结果（增强弹窗清理） ----------
         debug_print("检查续期结果")
-        # 多次关闭广告，确保弹窗被清除
         for _ in range(3):
             close_ads(page)
             time.sleep(1)
-        # 额外使用 JS 移除所有可能的遮挡
         page.run_js("""
             document.querySelectorAll('.overlay, .modal, .popup, [class*="overlay"], [class*="modal"], [class*="popup"]')
                 .forEach(el => el.remove());
@@ -1072,7 +1231,6 @@ def renew_account(account):
         time.sleep(2)
         page.wait.doc_loaded(timeout=15)
         page.wait(3)
-        # 再次关闭一次
         close_ads(page)
         result_text = page.run_js("document.body.innerText") or ""
         result_lower = result_text.lower()
@@ -1111,12 +1269,12 @@ def renew_account(account):
 
         if is_success:
             notify_success(phone, expiry_date or "未知日期", bot_token, chat_id)
-            return True
+            return "success", {"expiry": expiry_date}
         else:
             error_msg = "Captcha 验证失败" if "captcha" in result_lower else "页面未显示明确结果"
             notify_failed(phone, "结果页", error_msg, bot_token, chat_id)
             print(f"  [RESULT] 失败: {error_msg}", flush=True)
-            return False
+            return "failed", {"step": "结果页", "error": error_msg}
 
     except Exception as e:
         print(f"  ❌ 异常: {e}", flush=True)
@@ -1127,7 +1285,7 @@ def renew_account(account):
             except:
                 pass
         notify_failed(phone, "执行异常", str(e), bot_token, chat_id)
-        return False
+        return "failed", {"step": "执行异常", "error": str(e)}
     finally:
         if page:
             try:
@@ -1144,14 +1302,155 @@ if __name__ == "__main__":
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
         sys.exit(1)
     print(f"✅ 加载了 {len(ACCOUNTS)} 个账号", flush=True)
-    success = 0
-    for idx, acc in enumerate(ACCOUNTS, 1):
-        print(f"\n============================== 处理第 {idx}/{len(ACCOUNTS)} 个账号 ==============================", flush=True)
-        try:
-            if renew_account(acc):
-                success += 1
-        except Exception as e:
-            print(f"  ⚠️ 账号处理异常: {e}", flush=True)
-            traceback.print_exc()
-        time.sleep(random.randint(10, 30))
-    print(f"\n{'='*60}\n完成: {success}/{len(ACCOUNTS)} 个账号续期成功\n{'='*60}", flush=True)
+    print(f"✅ 跳过阈值: {SKIP_THRESHOLD_HOURS} 小时", flush=True)
+    print(f"✅ 最大轮数: {MAX_RENEW_ROUNDS}", flush=True)
+    print(f"✅ 进度通知: {'开启' if NOTIFY_PROGRESS else '关闭'}", flush=True)
+
+    total = len(ACCOUNTS)
+
+    # 通知通道：优先用第一个 bot_token + chat_id 都齐全的账号
+    summary_bot = ""
+    summary_chat = ""
+    for acc in ACCOUNTS:
+        if acc.get("bot_token") and acc.get("chat_id"):
+            summary_bot = acc["bot_token"]
+            summary_chat = acc["chat_id"]
+            break
+    if not summary_bot:
+        for acc in ACCOUNTS:
+            if acc.get("bot_token"):
+                summary_bot = acc["bot_token"]
+                summary_chat = acc.get("chat_id", "")
+                break
+
+    # 结果统计（用原始索引，确保 SESSION_STRING 匹配不因重试而错位）
+    success_set = set()
+    skipped_set = set()
+
+    # pending 是 (original_index, account) 列表
+    pending = [(i, acc) for i, acc in enumerate(ACCOUNTS, 1)]
+    round_no = 0
+
+    # ========== 外层轮次循环 ==========
+    while pending and round_no < MAX_RENEW_ROUNDS:
+        round_no += 1
+        print(f"\n{'#'*60}", flush=True)
+        print(f"  第 {round_no}/{MAX_RENEW_ROUNDS} 轮，待处理 {len(pending)} 个账号", flush=True)
+        print(f"{'#'*60}", flush=True)
+
+        # 第 2 轮开始前通知
+        if round_no > 1 and NOTIFY_PROGRESS:
+            try:
+                notify_round_start(round_no, MAX_RENEW_ROUNDS,
+                                   [a for _, a in pending],
+                                   summary_bot, summary_chat)
+            except Exception as e:
+                print(f"  [NOTIFY] 轮次开始通知失败: {e}", flush=True)
+
+        failed_in_round = []  # 本轮失败的 (orig_idx, acc)
+        accounts_this_round = pending  # 本轮要处理的账号快照
+
+        for i_in_round, (orig_idx, acc) in enumerate(accounts_this_round, 1):
+            phone = acc.get("phone", f"account_{orig_idx}")
+            print(f"\n===== [第{round_no}轮] 处理 {i_in_round}/{len(accounts_this_round)}: {phone} (原索引 {orig_idx}) =====", flush=True)
+
+            status = "failed"
+            info = {"step": "未知", "error": "未知"}
+            try:
+                status, info = renew_account(acc)
+            except Exception as e:
+                print(f"  ⚠️ 账号处理异常: {e}", flush=True)
+                traceback.print_exc()
+                status = "failed"
+                info = {"step": "主循环异常", "error": str(e)}
+
+            # 分类
+            if status == "success":
+                success_set.add(orig_idx)
+                emoji = "✅"
+                status_text = f"续期成功（到期 {info.get('expiry') or '未知'}）"
+            elif status == "skipped":
+                skipped_set.add(orig_idx)
+                emoji = "⏭️"
+                rh = info.get("remaining_hours")
+                status_text = f"已续期跳过（剩余 {rh:.1f}h）" if isinstance(rh, (int, float)) else "已续期跳过"
+            else:
+                failed_in_round.append((orig_idx, acc))
+                emoji = "❌"
+                status_text = f"失败（{info.get('step', '')}: {info.get('error', '')}）"
+
+            # 计算"本轮未完成" = 本轮剩下的 + 本轮已失败的
+            remaining_in_round = accounts_this_round[i_in_round:]
+            pending_phones = (
+                [a.get("phone", "?") for _, a in remaining_in_round] +
+                [a.get("phone", "?") for _, a in failed_in_round]
+            )
+
+            if NOTIFY_PROGRESS:
+                try:
+                    notify_progress(
+                        round_no=round_no,
+                        max_rounds=MAX_RENEW_ROUNDS,
+                        current_idx=i_in_round,
+                        total=len(accounts_this_round),
+                        phone=phone,
+                        status_emoji=emoji,
+                        status_text=status_text,
+                        pending_list=pending_phones,
+                        bot_token=acc.get("bot_token", "") or summary_bot,
+                        chat_id=acc.get("chat_id", "") or summary_chat,
+                    )
+                except Exception as e:
+                    print(f"  [NOTIFY] 进度通知失败: {e}", flush=True)
+
+            # 同一轮账号之间间隔
+            if i_in_round < len(accounts_this_round):
+                time.sleep(random.randint(10, 30))
+
+        # 本轮结束：把失败的作为下一轮的 pending
+        pending = failed_in_round
+
+        if pending:
+            print(f"\n[ROUND {round_no}] 本轮结束，仍有 {len(pending)} 个账号未完成", flush=True)
+            will_retry = round_no < MAX_RENEW_ROUNDS
+            if NOTIFY_PROGRESS:
+                try:
+                    notify_round_end(round_no, will_retry,
+                                     [a for _, a in pending],
+                                     summary_bot, summary_chat)
+                except Exception as e:
+                    print(f"  [NOTIFY] 轮次结束通知失败: {e}", flush=True)
+
+            # 若还有下一轮，等一下再开始，避免被风控
+            if will_retry:
+                delay = random.randint(60, 120)
+                print(f"  轮次间隔等待 {delay} 秒...", flush=True)
+                time.sleep(delay)
+        else:
+            break
+
+    # ========== 全部完成后：总结通知 ==========
+    final_failed = [a.get("phone", "?") for _, a in pending]
+    final_failed_detail = [(idx, a.get("phone", "?")) for idx, a in pending]
+
+    try:
+        notify_all_done(
+            total=total,
+            success=len(success_set),
+            failed=len(final_failed),
+            skipped=len(skipped_set),
+            failed_list=final_failed,
+            bot_token=summary_bot,
+            chat_id=summary_chat,
+        )
+    except Exception as e:
+        print(f"  [NOTIFY] 总结通知失败: {e}", flush=True)
+
+    print(f"\n{'='*60}", flush=True)
+    print(f"最终结果: 成功 {len(success_set)} / 跳过 {len(skipped_set)} / 失败 {len(final_failed)} / 共 {total} 个账号", flush=True)
+    print(f"总轮数: {round_no}", flush=True)
+    if final_failed_detail:
+        print("仍失败的账号：", flush=True)
+        for idx, phone in final_failed_detail:
+            print(f"  - 索引 {idx}: {phone}", flush=True)
+    print(f"{'='*60}", flush=True)
