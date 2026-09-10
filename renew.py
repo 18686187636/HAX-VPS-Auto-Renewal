@@ -4,7 +4,7 @@
 HAX VPS Auto-Renewal (最终修正版 - 续期码文件读写)
 - 每个账号完成后 TG 通知剩余未完成列表
 - 全部完成后 TG 通知「今日 hax 续期全部完成」
-- 登录后检测到期时间，剩余 > 72h 则跳过
+- 登录后检测到期时间，剩余 > 96h 则跳过
 - 失败账号自动重试，最多 5 轮
 """
 import os
@@ -42,7 +42,7 @@ SEND_SCREENSHOTS = os.getenv("SEND_SCREENSHOTS", "true").lower() == "true"
 # 进度通知开关（每个账号完成后推送）
 NOTIFY_PROGRESS = os.getenv("NOTIFY_PROGRESS", "true").lower() == "true"
 # 剩余时间超过该阈值（小时）则视为"已续期"，直接跳过
-SKIP_THRESHOLD_HOURS = float(os.getenv("SKIP_THRESHOLD_HOURS", "72"))
+SKIP_THRESHOLD_HOURS = float(os.getenv("SKIP_THRESHOLD_HOURS", "96"))
 # 失败账号最大重试轮数
 MAX_RENEW_ROUNDS = int(os.getenv("MAX_RENEW_ROUNDS", "5"))
 
@@ -274,15 +274,107 @@ def get_page_field_value(page, label_text):
         return ""
 
 def parse_dt(s):
+    """
+    支持以下所有格式（多余空白/括号注释会被忽略）：
+      1) "HH:MM:SS - Month DD, YYYY"   → 时间在前、日期在后（HAX 的 Current time）
+      2) "HH:MM - Month DD, YYYY"
+      3) "Month DD, YYYY HH:MM:SS"      → 日期在前、时间在后
+      4) "Month DD, YYYY"               → 只有日期，按当天 00:00:00 处理（HAX 的 Valid until）
+      5) "YYYY-MM-DD HH:MM:SS" / "YYYY-MM-DD" / "YYYY/MM/DD ..."
+      6) "DD Month YYYY" 等常见变体
+    解析不到时间部分时，按当天 00:00:00 处理。
+    """
     if not s:
         return None
+
+    # 去掉括号注释 (UTC+8) 之类，压缩空白
     s = re.sub(r'\(.*?\)', '', s).strip()
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
-                "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M", "%Y/%m/%d"):
+    s = re.sub(r'\s+', ' ', s)
+
+    MONTHS = {
+        'january': 1, 'jan': 1,
+        'february': 2, 'feb': 2,
+        'march': 3, 'mar': 3,
+        'april': 4, 'apr': 4,
+        'may': 5,
+        'june': 6, 'jun': 6,
+        'july': 7, 'jul': 7,
+        'august': 8, 'aug': 8,
+        'september': 9, 'sep': 9, 'sept': 9,
+        'october': 10, 'oct': 10,
+        'november': 11, 'nov': 11,
+        'december': 12, 'dec': 12,
+    }
+
+    def month_num(name):
+        if not name:
+            return None
+        return MONTHS.get(name.strip().lower().rstrip('.,'))
+
+    # ---- 1) "HH:MM[:SS] - Month DD, YYYY"  （时间 - 日期）----
+    m = re.match(
+        r'^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*-\s*'
+        r'([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})$',
+        s
+    )
+    if m:
+        hh = int(m.group(1)); mm = int(m.group(2))
+        ss = int(m.group(3)) if m.group(3) else 0
+        mon = month_num(m.group(4))
+        day = int(m.group(5)); year = int(m.group(6))
+        if mon:
+            try:
+                return datetime(year, mon, day, hh, mm, ss)
+            except Exception:
+                pass
+
+    # ---- 2) "Month DD, YYYY HH:MM[:SS]"  （日期 时间）----
+    m = re.match(
+        r'^([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})'
+        r'(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$',
+        s
+    )
+    if m:
+        mon = month_num(m.group(1))
+        day = int(m.group(2)); year = int(m.group(3))
+        hh = int(m.group(4)) if m.group(4) else 0
+        mm = int(m.group(5)) if m.group(5) else 0
+        ss = int(m.group(6)) if m.group(6) else 0
+        if mon:
+            try:
+                return datetime(year, mon, day, hh, mm, ss)
+            except Exception:
+                pass
+
+    # ---- 3) "DD Month YYYY [HH:MM[:SS]]"  （日 月 年）----
+    m = re.match(
+        r'^(\d{1,2})\s+([A-Za-z]+),?\s+(\d{4})'
+        r'(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$',
+        s
+    )
+    if m:
+        day = int(m.group(1))
+        mon = month_num(m.group(2))
+        year = int(m.group(3))
+        hh = int(m.group(4)) if m.group(4) else 0
+        mm = int(m.group(5)) if m.group(5) else 0
+        ss = int(m.group(6)) if m.group(6) else 0
+        if mon:
+            try:
+                return datetime(year, mon, day, hh, mm, ss)
+            except Exception:
+                pass
+
+    # ---- 4) 数字日期格式，用 strptime 快速处理 ----
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
+        "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M", "%Y/%m/%d",
+    ):
         try:
             return datetime.strptime(s, fmt)
-        except:
+        except Exception:
             continue
+
     return None
 
 def check_should_renew(page):
