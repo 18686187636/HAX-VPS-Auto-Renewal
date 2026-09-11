@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (Cookie + requests 双重探测)
+HAX VPS Auto-Renewal (Cookie + requests 双重探测 - 修正版)
 """
 import os
 import sys
@@ -471,7 +471,6 @@ def normalize_cookies(cookies_data):
                 pass
         result.append(nc)
 
-    # 只保留一个 PHPSESSID（path=/ 优先）
     uniq = []
     seen_php = False
     for c in result:
@@ -497,11 +496,11 @@ def _cookie_attr(c, attr, default=""):
     return getattr(c, attr, default)
 
 
-# ===================== ★ requests 探测（新增）=====================
+# ===================== ★ requests 探测（判定和测试 1 一致）=====================
 def probe_cookie_with_requests(sess_value):
     """
     用纯 requests + PHPSESSID 直接测服务器端是否有效。
-    返回 (ok: bool, info: str)
+    判定逻辑完全照抄 test_all.py 中已成功过的版本。
     """
     proxies = get_proxies()
     headers = {
@@ -523,13 +522,32 @@ def probe_cookie_with_requests(sess_value):
         return False, f"requests 异常: {e}"
 
     text = r.text
-    if ("Valid until" in text) or ("Logout" in text) or ("Log out" in text):
-        return True, f"服务端有效 (HTTP {r.status_code})"
-    if ('>Login<' in text) or ("Log in" in text and "Logout" not in text):
-        return False, f"服务端拒绝（session 已过期）(HTTP {r.status_code})"
-    # Cloudflare 挑战
-    if "just a moment" in text.lower() or "cf-challenge" in text.lower():
+    text_lower = text.lower()
+
+    is_cf = (
+        "cf-challenge" in text_lower
+        or "just a moment" in text_lower
+        or "checking your browser" in text_lower
+        or "challenge-platform" in text_lower
+    )
+    has_logout = ("Logout" in text) or ("Log out" in text) or ("logout" in text)
+    has_login_btn = ('>Login<' in text) or ('>login<' in text)
+    has_valid_until = "Valid until" in text
+    has_vps_info = "VPS Information" in text or "vps-info" in r.url
+    redirected_to_login = "/login" in r.url
+
+    # 详细日志
+    print(f"    [探测详情] CF={is_cf} Logout={has_logout} Login={has_login_btn} "
+          f"Valid={has_valid_until} VPSInfo={has_vps_info} 重定向到login={redirected_to_login}", flush=True)
+
+    if is_cf:
         return False, f"Cloudflare 拦截 (HTTP {r.status_code})"
+    if has_logout or has_valid_until or has_vps_info:
+        return True, f"服务端有效 (HTTP {r.status_code})"
+    if redirected_to_login:
+        return False, f"被重定向到 /login，session 已过期"
+    if has_login_btn:
+        return False, f"服务端拒绝 (HTTP {r.status_code})"
     return False, f"状态不明 (HTTP {r.status_code}, final={r.url})"
 
 
@@ -537,13 +555,13 @@ def probe_cookie_with_requests(sess_value):
 def set_session_cookie(page, cookies_data):
     """
     依次尝试所有可能的 cookie 注入 API，最后用 requests 探测服务端状态。
+    requests 探测失败不再阻断，仅作参考，让 is_logged_in 做最终判定。
     """
     cookies_list = normalize_cookies(cookies_data)
     if not cookies_list:
         print("  [COOKIE] ⚠️ cookie 数据为空或格式不支持", flush=True)
         return False
 
-    # 提取 PHPSESSID
     sess_value = None
     for c in cookies_list:
         if c["name"] == "PHPSESSID":
@@ -556,14 +574,12 @@ def set_session_cookie(page, cookies_data):
 
     print(f"  [COOKIE] 目标 PHPSESSID: {sess_value[:8]}...{sess_value[-4:]}", flush=True)
 
-    # ---- 0. ★ 先用 requests 探测 cookie 是否在服务端有效 ----
+    # ---- 0. ★ requests 探测（仅作参考，不阻断）----
     ok, info = probe_cookie_with_requests(sess_value)
     if ok:
         print(f"  [COOKIE] ✅ requests 探测：{info}", flush=True)
     else:
-        print(f"  [COOKIE] ❌ requests 探测：{info}", flush=True)
-        print(f"  [COOKIE] → 该 PHPSESSID 已在服务端失效，必须重新登录 HAX 导出", flush=True)
-        return False
+        print(f"  [COOKIE] ⚠️ requests 探测：{info}（继续尝试浏览器注入）", flush=True)
 
     # ---- 1. 访问 /login ----
     try:
@@ -627,7 +643,6 @@ def set_session_cookie(page, cookies_data):
     except Exception:
         pass
 
-    # 尝试读 driver cookies
     for attr in ['driver', '_driver', 'browser', '_browser']:
         obj = getattr(page, attr, None)
         if obj is None:
@@ -650,7 +665,6 @@ def set_session_cookie(page, cookies_data):
             except Exception:
                 pass
 
-    # ---- 4. 返回 True，让 is_logged_in 最终判定 ----
     return True
 
 
@@ -1290,9 +1304,7 @@ def renew_account(account):
                     except Exception:
                         pass
             else:
-                print("  ⚠️ Cookie 探测失败（服务端已失效），跳过 OAuth 直接失败", flush=True)
-                # 主动跳过 OAuth（因为 cookie 已失效，OAuth 也无意义）
-                raise RuntimeError("PHPSESSID 已过期，需要重新导出")
+                print("  ⚠️ Cookie 注入失败，尝试 OAuth", flush=True)
 
         if not login_success:
             debug_print("执行 OAuth 兜底")
