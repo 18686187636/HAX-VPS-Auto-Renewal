@@ -149,11 +149,10 @@ jobs:
 
       - name: Run all tests
         env:
-          ACCOUNTS_JSON: ${{ secrets.ACCOUNTS_JSON }}
+          TEST_ACCOUNTS_JSON: ${{ secrets.TEST_ACCOUNTS_JSON }}
           PROXY_SERVER: ${{ secrets.NODE_LINK != '' && 'http://127.0.0.1:1081' || '' }}
           BROWSER_UA: ${{ secrets.BROWSER_UA }}
           HEADLESS: "true"
-          # 想跳过某个测试，改这里，例如 SKIP_TEST=2
           SKIP_TEST: ""
         run: |
           xvfb-run --auto-servernum python3 test_all.py
