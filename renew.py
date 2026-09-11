@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (Cookie 修正版 - 完整)
-- 支持 session_token 为完整 cookie 数组（含 PHPSESSID 多 path）
-- 兼容旧格式（单一 PHPSESSID 字符串）
-- set_session_cookie 只做注入，不做严格 readback 判定，靠 is_logged_in 最终确认
-- readback 仅作为日志输出（ruyipage get_cookies 有局限）
+HAX VPS Auto-Renewal (Cookie 修正版 - driver.add_cookie)
+- 使用底层 driver.add_cookie 注入 cookie（最可靠）
+- 兼容 set_cookies / JS document.cookie 多路兜底
+- 日志打印 document.cookie 和 driver.get_cookies 便于排查
 - 每个账号完成后 TG 通知剩余未完成列表
 - 失败账号自动重试，最多 5 轮
 """
@@ -45,7 +44,6 @@ NOTIFY_PROGRESS = os.getenv("NOTIFY_PROGRESS", "true").lower() == "true"
 SKIP_THRESHOLD_HOURS = float(os.getenv("SKIP_THRESHOLD_HOURS", "96"))
 MAX_RENEW_ROUNDS = int(os.getenv("MAX_RENEW_ROUNDS", "5"))
 
-# 需要忽略的第三方 cookie 名字（Google Analytics、Ads、同意管理等）
 IGNORE_COOKIE_NAMES = {
     "_ga", "_gid", "_gat_gtag_UA_179253361_1", "_ga_MK6PLQ755F",
     "__gads", "__gpi", "__eoi",
@@ -443,12 +441,6 @@ def is_logged_in(page):
 
 # ===================== Cookie 规范化 =====================
 def normalize_cookies(cookies_data):
-    """
-    统一成 list[dict]。支持：
-      - str: 单一 PHPSESSID（老格式）
-      - list[dict]: Cookie-Editor 导出的完整数组
-    自动过滤第三方 cookie（_ga、__gads 等）。
-    """
     if isinstance(cookies_data, str):
         return [
             {"name": "PHPSESSID", "value": cookies_data,
@@ -488,7 +480,6 @@ def normalize_cookies(cookies_data):
                 pass
         result.append(nc)
 
-    # 去重（name + domain + path）
     seen = set()
     uniq = []
     for c in result:
@@ -501,17 +492,41 @@ def normalize_cookies(cookies_data):
 
 
 def _cookie_attr(c, attr, default=""):
-    """兼容 dict 和 CookieInfo 对象"""
     if isinstance(c, dict):
         return c.get(attr, default)
     return getattr(c, attr, default)
 
 
+def _find_driver(page):
+    """遍历 page 对象，找到持有 add_cookie 的底层 driver"""
+    # 常见属性
+    for attr in ['driver', '_driver', 'page', '_page', 'selenium', '_selenium']:
+        try:
+            candidate = getattr(page, attr, None)
+            if candidate is not None and hasattr(candidate, 'add_cookie'):
+                return candidate, attr
+        except Exception:
+            pass
+    # 兜底：遍历所有属性
+    for attr in dir(page):
+        if attr.startswith('__'):
+            continue
+        try:
+            candidate = getattr(page, attr)
+            if hasattr(candidate, 'add_cookie'):
+                return candidate, attr
+        except Exception:
+            continue
+    return None, None
+
+
 def set_session_cookie(page, cookies_data):
     """
-    注入 cookie。
-    - 不做严格 readback 验证（ruyipage 的 get_cookies() 有局限）
-    - 真正的判定交给 is_logged_in()
+    注入 cookie，多路尝试：
+      1. driver.add_cookie  (Selenium 原生，最可靠)
+      2. page.set_cookies   (ruyipage 封装)
+      3. JS document.cookie (兜底)
+    并打印 document.cookie 验证实际写入情况
     """
     cookies_list = normalize_cookies(cookies_data)
     if not cookies_list:
@@ -521,7 +536,7 @@ def set_session_cookie(page, cookies_data):
     names = [f"{c['name']}@{c.get('domain')}{c.get('path', '/')}" for c in cookies_list]
     print(f"  [COOKIE] 准备注入 {len(cookies_list)} 个: {names}", flush=True)
 
-    # ---- 1. 先访问 hax.co.id 根路径，让浏览器进入正确域 ----
+    # ---- 0. 先访问 hax.co.id，让浏览器进入目标域 ----
     try:
         page.get("https://hax.co.id/")
         page.wait.doc_loaded(timeout=20)
@@ -530,62 +545,78 @@ def set_session_cookie(page, cookies_data):
     except Exception as e:
         debug_print(f"预访问首页失败: {e}")
 
-    # ---- 2. 尝试 set_cookies（原生方法）----
-    set_ok = False
-    try:
-        page.set_cookies(cookies_list)
-        print(f"  [COOKIE] set_cookies(domain/path) 调用成功", flush=True)
-        set_ok = True
-    except Exception as e:
-        print(f"  [COOKIE] set_cookies(domain/path) 异常: {e}", flush=True)
+    # ---- 1. 找到底层 driver ----
+    driver, driver_attr = _find_driver(page)
+    if driver is not None:
+        print(f"  [COOKIE] 找到底层 driver: page.{driver_attr}", flush=True)
+    else:
+        print(f"  [COOKIE] ⚠️ 未找到 driver.add_cookie，将只用 set_cookies/JS", flush=True)
 
-    # ---- 2b. 如果失败，用 url 字段重试 ----
-    if not set_ok:
+    # ---- 2. driver.add_cookie（最可靠）----
+    add_ok = 0
+    if driver is not None:
+        for c in cookies_list:
+            try:
+                cookie_dict = {
+                    "name": c["name"],
+                    "value": c["value"],
+                    "domain": c.get("domain", "hax.co.id"),
+                    "path": c.get("path", "/"),
+                }
+                if c.get("secure"):
+                    cookie_dict["secure"] = True
+                if c.get("expires"):
+                    try:
+                        cookie_dict["expiry"] = int(c["expires"])
+                    except Exception:
+                        pass
+                driver.add_cookie(cookie_dict)
+                add_ok += 1
+            except Exception as e:
+                print(f"  [COOKIE] add_cookie 失败 ({c.get('name')}@{c.get('path')}): {e}", flush=True)
+        print(f"  [COOKIE] driver.add_cookie 成功 {add_ok}/{len(cookies_list)} 个", flush=True)
+
+    # ---- 3. page.set_cookies（兜底，失败或未全成功时尝试）----
+    if add_ok < len(cookies_list):
         try:
-            cookies_with_url = []
-            for c in cookies_list:
-                nc = dict(c)
-                dom = c.get("domain", "hax.co.id").lstrip(".")
-                pth = c.get("path", "/")
-                nc["url"] = f"https://{dom}{pth}"
-                cookies_with_url.append(nc)
-            page.set_cookies(cookies_with_url)
-            print(f"  [COOKIE] set_cookies(url) 调用成功", flush=True)
-            set_ok = True
+            page.set_cookies(cookies_list)
+            print(f"  [COOKIE] page.set_cookies 调用完成（不保证生效）", flush=True)
         except Exception as e:
-            print(f"  [COOKIE] set_cookies(url) 异常: {e}", flush=True)
+            print(f"  [COOKIE] page.set_cookies 异常: {e}", flush=True)
 
-    # ---- 3. 无论 set_cookies 成功与否，都用 JS 兜底再写一遍 ----
-    #      PHPSESSID 不是 httpOnly，JS 可以直接设置
-    js_ok_count = 0
+    # ---- 4. JS 兜底 ----
+    js_ok = 0
     for c in cookies_list:
         try:
             js = (f"document.cookie = '{c['name']}={c['value']}; "
-                  f"path={c.get('path', '/')}; "
-                  f"domain={c.get('domain', 'hax.co.id')}; SameSite=Lax';")
+                  f"path={c.get('path', '/')}; SameSite=Lax';")
             page.run_js(js)
-            js_ok_count += 1
-        except Exception as e:
-            debug_print(f"JS 注入 {c.get('name')} 失败: {e}")
-    print(f"  [COOKIE] JS 兜底注入 {js_ok_count}/{len(cookies_list)} 个", flush=True)
+            js_ok += 1
+        except Exception:
+            pass
+    print(f"  [COOKIE] JS document.cookie 注入 {js_ok}/{len(cookies_list)} 个", flush=True)
 
-    # ---- 4. readback 只做日志，不做判定 ----
+    # ---- 5. 验证 document.cookie ----
     try:
-        readback = page.get_cookies()
-        found = []
-        for c in readback:
-            d = str(_cookie_attr(c, "domain", ""))
-            n = str(_cookie_attr(c, "name", ""))
-            if "hax.co.id" in d:
-                found.append(f"{n}@{d}")
-        if found:
-            print(f"  [COOKIE] readback: {len(found)} 个 ({found})", flush=True)
+        doc_cookie = page.run_js("document.cookie") or ""
+        if doc_cookie:
+            print(f"  [COOKIE] document.cookie 长度={len(doc_cookie)} 前 120 字符: {doc_cookie[:120]}", flush=True)
         else:
-            print(f"  [COOKIE] readback: 0 个（API 局限，忽略，靠 is_logged_in 判定）", flush=True)
+            print(f"  [COOKIE] document.cookie 为空 —— JS 注入被浏览器拒绝", flush=True)
     except Exception as e:
-        debug_print(f"readback 失败（忽略）: {e}")
+        debug_print(f"读取 document.cookie 失败: {e}")
 
-    # ---- 5. 只要有一个路径没抛异常，就返回 True，让 is_logged_in 做最终判定 ----
+    # ---- 6. driver.get_cookies 验证 ----
+    if driver is not None and hasattr(driver, 'get_cookies'):
+        try:
+            all_c = driver.get_cookies() or []
+            hax_c = [c for c in all_c if "hax.co.id" in str(c.get("domain", ""))]
+            print(f"  [COOKIE] driver.get_cookies: hax.co.id 下 {len(hax_c)} 个", flush=True)
+            for c in hax_c:
+                print(f"      - {c.get('name')}@{c.get('domain')}{c.get('path', '/')}", flush=True)
+        except Exception as e:
+            debug_print(f"driver.get_cookies 失败: {e}")
+
     return True
 
 
@@ -1207,7 +1238,7 @@ def renew_account(account):
             cookie_ok = set_session_cookie(page, session_token)
             if cookie_ok:
                 debug_print("Cookie 注入完成，跳转 vps-info")
-                time.sleep(2)  # ★ 等 cookie 生效
+                time.sleep(2)
                 page.get("https://hax.co.id/vps-info")
                 page.wait.doc_loaded(timeout=15)
                 page.wait(2)
@@ -1517,7 +1548,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (Cookie 修正版)", flush=True)
+    print("   HAX 自动续期 (Cookie 修正版 - driver.add_cookie)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
