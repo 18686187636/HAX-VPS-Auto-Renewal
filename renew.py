@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (Cookie 修正版 - driver.add_cookie)
-- 使用底层 driver.add_cookie 注入 cookie（最可靠）
-- 兼容 set_cookies / JS document.cookie 多路兜底
-- 日志打印 document.cookie 和 driver.get_cookies 便于排查
-- 每个账号完成后 TG 通知剩余未完成列表
-- 失败账号自动重试，最多 5 轮
+HAX VPS Auto-Renewal (Cookie 修正版 - 回退测试 3 成功流程)
 """
 import os
 import sys
@@ -445,8 +440,6 @@ def normalize_cookies(cookies_data):
         return [
             {"name": "PHPSESSID", "value": cookies_data,
              "domain": "hax.co.id", "path": "/"},
-            {"name": "PHPSESSID", "value": cookies_data,
-             "domain": "hax.co.id", "path": "/vps-info"},
         ]
 
     if not isinstance(cookies_data, list):
@@ -480,14 +473,31 @@ def normalize_cookies(cookies_data):
                 pass
         result.append(nc)
 
-    seen = set()
+    # ★ 去重：只保留 path=/ 的一个 PHPSESSID（避免 path 冲突）
+    #   如果只有一个 PHPSESSID 落在 /vps-info，也要保留
+    seen_names = set()
     uniq = []
+    # 先处理 path=/
     for c in result:
-        key = (c["name"], c["domain"], c["path"])
-        if key in seen:
+        if c["name"] == "PHPSESSID" and c["path"] == "/":
+            uniq.append(c)
+            seen_names.add(c["name"])
+            break
+    # 再加其他 cookie（非 PHPSESSID）
+    for c in result:
+        if c["name"] == "PHPSESSID":
             continue
-        seen.add(key)
+        key = (c["name"], c["domain"], c["path"])
+        if key in seen_names:
+            continue
+        seen_names.add(key)
         uniq.append(c)
+    # 如果 PHPSESSID 没有 path=/ 的，取任意一个
+    if not any(c["name"] == "PHPSESSID" for c in uniq):
+        for c in result:
+            if c["name"] == "PHPSESSID":
+                uniq.insert(0, c)
+                break
     return uniq
 
 
@@ -497,36 +507,32 @@ def _cookie_attr(c, attr, default=""):
     return getattr(c, attr, default)
 
 
-def _find_driver(page):
-    """遍历 page 对象，找到持有 add_cookie 的底层 driver"""
-    # 常见属性
-    for attr in ['driver', '_driver', 'page', '_page', 'selenium', '_selenium']:
-        try:
-            candidate = getattr(page, attr, None)
-            if candidate is not None and hasattr(candidate, 'add_cookie'):
-                return candidate, attr
-        except Exception:
-            pass
-    # 兜底：遍历所有属性
-    for attr in dir(page):
-        if attr.startswith('__'):
-            continue
-        try:
-            candidate = getattr(page, attr)
-            if hasattr(candidate, 'add_cookie'):
-                return candidate, attr
-        except Exception:
-            continue
-    return None, None
+def _print_page_debug(page):
+    """打印 page 对象属性，帮助找到 driver"""
+    try:
+        print(f"  [DEBUG] page 类型: {type(page).__name__}", flush=True)
+        attrs = [a for a in dir(page) if not a.startswith('_')]
+        print(f"  [DEBUG] page 属性 ({len(attrs)}): {attrs}", flush=True)
+        for name in ['driver', '_driver', 'browser', '_browser',
+                     'tab', '_tab', 'session', '_session',
+                     'set', 'cookies', 'ele', 'run_js']:
+            if hasattr(page, name):
+                try:
+                    obj = getattr(page, name)
+                    print(f"  [DEBUG] page.{name} 类型: {type(obj).__name__}", flush=True)
+                except Exception as e:
+                    print(f"  [DEBUG] page.{name} 访问失败: {e}", flush=True)
+    except Exception as e:
+        print(f"  [DEBUG] 列举 page 属性失败: {e}", flush=True)
 
 
 def set_session_cookie(page, cookies_data):
     """
-    注入 cookie，多路尝试：
-      1. driver.add_cookie  (Selenium 原生，最可靠)
-      2. page.set_cookies   (ruyipage 封装)
-      3. JS document.cookie (兜底)
-    并打印 document.cookie 验证实际写入情况
+    回退到测试 3 的成功流程：
+      1. page.get("https://hax.co.id/login")
+      2. page.set_cookies(cookies_list)
+      3. readback（仅日志）
+    不做 JS 注入、不做 driver.add_cookie
     """
     cookies_list = normalize_cookies(cookies_data)
     if not cookies_list:
@@ -536,86 +542,53 @@ def set_session_cookie(page, cookies_data):
     names = [f"{c['name']}@{c.get('domain')}{c.get('path', '/')}" for c in cookies_list]
     print(f"  [COOKIE] 准备注入 {len(cookies_list)} 个: {names}", flush=True)
 
-    # ---- 0. 先访问 hax.co.id，让浏览器进入目标域 ----
+    # ---- 1. 访问 /login（完全照抄测试 3）----
     try:
-        page.get("https://hax.co.id/")
+        page.get("https://hax.co.id/login")
         page.wait.doc_loaded(timeout=20)
-        time.sleep(1)
+        time.sleep(3)
         print(f"  [COOKIE] 当前页面: {page.url}", flush=True)
     except Exception as e:
-        debug_print(f"预访问首页失败: {e}")
+        debug_print(f"预访问 /login 失败: {e}")
 
-    # ---- 1. 找到底层 driver ----
-    driver, driver_attr = _find_driver(page)
-    if driver is not None:
-        print(f"  [COOKIE] 找到底层 driver: page.{driver_attr}", flush=True)
-    else:
-        print(f"  [COOKIE] ⚠️ 未找到 driver.add_cookie，将只用 set_cookies/JS", flush=True)
-
-    # ---- 2. driver.add_cookie（最可靠）----
-    add_ok = 0
-    if driver is not None:
-        for c in cookies_list:
-            try:
-                cookie_dict = {
-                    "name": c["name"],
-                    "value": c["value"],
-                    "domain": c.get("domain", "hax.co.id"),
-                    "path": c.get("path", "/"),
-                }
-                if c.get("secure"):
-                    cookie_dict["secure"] = True
-                if c.get("expires"):
-                    try:
-                        cookie_dict["expiry"] = int(c["expires"])
-                    except Exception:
-                        pass
-                driver.add_cookie(cookie_dict)
-                add_ok += 1
-            except Exception as e:
-                print(f"  [COOKIE] add_cookie 失败 ({c.get('name')}@{c.get('path')}): {e}", flush=True)
-        print(f"  [COOKIE] driver.add_cookie 成功 {add_ok}/{len(cookies_list)} 个", flush=True)
-
-    # ---- 3. page.set_cookies（兜底，失败或未全成功时尝试）----
-    if add_ok < len(cookies_list):
-        try:
-            page.set_cookies(cookies_list)
-            print(f"  [COOKIE] page.set_cookies 调用完成（不保证生效）", flush=True)
-        except Exception as e:
-            print(f"  [COOKIE] page.set_cookies 异常: {e}", flush=True)
-
-    # ---- 4. JS 兜底 ----
-    js_ok = 0
-    for c in cookies_list:
-        try:
-            js = (f"document.cookie = '{c['name']}={c['value']}; "
-                  f"path={c.get('path', '/')}; SameSite=Lax';")
-            page.run_js(js)
-            js_ok += 1
-        except Exception:
-            pass
-    print(f"  [COOKIE] JS document.cookie 注入 {js_ok}/{len(cookies_list)} 个", flush=True)
-
-    # ---- 5. 验证 document.cookie ----
+    # ---- 2. 只调 set_cookies ----
     try:
-        doc_cookie = page.run_js("document.cookie") or ""
-        if doc_cookie:
-            print(f"  [COOKIE] document.cookie 长度={len(doc_cookie)} 前 120 字符: {doc_cookie[:120]}", flush=True)
-        else:
-            print(f"  [COOKIE] document.cookie 为空 —— JS 注入被浏览器拒绝", flush=True)
+        page.set_cookies(cookies_list)
+        print(f"  [COOKIE] page.set_cookies 调用成功", flush=True)
     except Exception as e:
-        debug_print(f"读取 document.cookie 失败: {e}")
+        print(f"  [COOKIE] page.set_cookies 异常: {e}", flush=True)
+        return False
 
-    # ---- 6. driver.get_cookies 验证 ----
-    if driver is not None and hasattr(driver, 'get_cookies'):
-        try:
-            all_c = driver.get_cookies() or []
-            hax_c = [c for c in all_c if "hax.co.id" in str(c.get("domain", ""))]
-            print(f"  [COOKIE] driver.get_cookies: hax.co.id 下 {len(hax_c)} 个", flush=True)
-            for c in hax_c:
-                print(f"      - {c.get('name')}@{c.get('domain')}{c.get('path', '/')}", flush=True)
-        except Exception as e:
-            debug_print(f"driver.get_cookies 失败: {e}")
+    time.sleep(1)
+
+    # ---- 3. readback（仅日志，不做判定）----
+    try:
+        rb = page.get_cookies()
+        hax_c = []
+        for c in rb:
+            d = str(_cookie_attr(c, "domain", ""))
+            if "hax.co.id" in d:
+                n = _cookie_attr(c, "name", "")
+                p = _cookie_attr(c, "path", "/")
+                v = _cookie_attr(c, "value", "")
+                hax_c.append(f"{n}@{d}{p}={str(v)[:8]}...")
+        print(f"  [COOKIE] readback hax.co.id 下 {len(hax_c)} 个:", flush=True)
+        for n in hax_c:
+            print(f"      {n}", flush=True)
+    except Exception as e:
+        debug_print(f"readback 失败: {e}")
+
+    # ---- 4. 打印 document.cookie 完整内容 ----
+    try:
+        doc = page.run_js("document.cookie") or ""
+        print(f"  [COOKIE] document.cookie ({len(doc)} 字符): {doc[:400]}", flush=True)
+    except Exception:
+        pass
+
+    # ---- 5. 首次调用时打印 page 属性帮助排查 ----
+    if not getattr(set_session_cookie, '_debug_printed', False):
+        _print_page_debug(page)
+        set_session_cookie._debug_printed = True
 
     return True
 
@@ -1225,7 +1198,8 @@ def renew_account(account):
         print(f"  [BROWSER] 正在启动浏览器...", flush=True)
         page = launch(**launch_args)
 
-        debug_print("浏览器启动成功，开始访问登录页")
+        debug_print("浏览器启动成功")
+        # 先访问 /login（和测试 3 一致）
         page.get("https://hax.co.id/login")
         page.wait.doc_loaded(timeout=20)
         page.wait(3)
@@ -1548,7 +1522,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (Cookie 修正版 - driver.add_cookie)", flush=True)
+    print("   HAX 自动续期 (回退测试 3 成功流程)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
