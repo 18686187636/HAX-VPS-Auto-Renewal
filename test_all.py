@@ -7,8 +7,10 @@ HAX Cookie 完整测试（合并版）
   2. 浏览器启动 + UA + cookie 注入（不登录 HAX）
   3. 真实 HAX 登录验证（完整流程）
 
+优先读 TEST_ACCOUNTS_JSON，读不到再回退 ACCOUNTS_JSON。
+
 用法：
-  ACCOUNTS_JSON='[...]' PROXY_SERVER=http://127.0.0.1:1081 python3 test_all.py
+  TEST_ACCOUNTS_JSON='[...]' PROXY_SERVER=http://127.0.0.1:1081 python3 test_all.py
 
 可选环境变量：
   SKIP_TEST=1,2,3    跳过指定测试（逗号分隔）
@@ -21,6 +23,7 @@ import sys
 import json
 import time
 import re
+import traceback
 
 # ========== 延迟导入，避免测试 1 因缺 ruyipage 而崩溃 ==========
 try:
@@ -83,22 +86,36 @@ def sub_banner(text):
 
 
 def load_accounts():
-    raw = os.getenv("ACCOUNTS_JSON", "[]")
+    """优先读 TEST_ACCOUNTS_JSON，回退到 ACCOUNTS_JSON"""
+    raw = os.getenv("TEST_ACCOUNTS_JSON", "").strip()
+    source = "TEST_ACCOUNTS_JSON"
+    if not raw:
+        raw = os.getenv("ACCOUNTS_JSON", "[]").strip()
+        source = "ACCOUNTS_JSON（回退）"
+
+    print(f"📦 账号来源: {source}")
+
+    if not raw:
+        print("❌ 两个变量都为空，请配置 TEST_ACCOUNTS_JSON")
+        sys.exit(2)
+
     try:
         accounts = json.loads(raw)
     except Exception as e:
-        print(f"❌ ACCOUNTS_JSON 解析失败: {e}")
+        print(f"❌ {source} 解析失败: {e}")
+        print(f"   原始内容前 200 字符: {raw[:200]}")
         sys.exit(2)
     if not accounts:
-        print("❌ ACCOUNTS_JSON 为空")
+        print(f"❌ {source} 为空数组")
         sys.exit(2)
     return accounts
 
 
 def normalize_cookies(cookies_data):
     """
-    统一成 ruyipage / requests 都能接受的 list[dict]。
+    统一成 list[dict]。
     支持 str / list[dict]。
+    自动过滤第三方 cookie（_ga、__gads 等）。
     """
     if isinstance(cookies_data, str):
         return [
@@ -201,9 +218,9 @@ def test_1_requests_cookie(accounts):
     banner("requests 验证 PHPSESSID（不启动浏览器）", step=1)
 
     proxies = get_requests_proxies()
-    print(f"🔗 代理:     {PROXY_SERVER or '(直连)'}")
+    print(f"🔗 代理:        {PROXY_SERVER or '(直连)'}")
     print(f"🖥️  User-Agent: {UA[:80]}...")
-    print(f"👥 账号数:   {len(accounts)}")
+    print(f"👥 账号数:      {len(accounts)}")
 
     all_ok = True
     summary = []
@@ -334,6 +351,7 @@ def test_2_browser():
         ua_via_arg = False
     except Exception as e:
         print(f"  ❌ 浏览器启动失败: {e}")
+        traceback.print_exc()
         return False
 
     try:
@@ -590,7 +608,6 @@ def test_3_real_hax_login(accounts):
 
         except Exception as e:
             print(f"  ❌ 异常: {e}")
-            import traceback
             traceback.print_exc()
             all_ok = False
             summary.append((phone, f"❌ 异常: {e}"))
@@ -633,6 +650,7 @@ def main():
         print(f"  SKIP_TEST:    {sorted(SKIPPED)}")
 
     accounts = load_accounts()
+    print(f"  ✅ 加载 {len(accounts)} 个账号")
 
     # ---- 测试 1 ----
     if 1 in SKIPPED:
@@ -643,7 +661,6 @@ def main():
             RESULTS["test1"] = test_1_requests_cookie(accounts)
         except Exception as e:
             print(f"\n❌ 测试 1 崩溃: {e}")
-            import traceback
             traceback.print_exc()
             RESULTS["test1"] = False
 
@@ -659,7 +676,6 @@ def main():
             RESULTS["test2"] = test_2_browser()
         except Exception as e:
             print(f"\n❌ 测试 2 崩溃: {e}")
-            import traceback
             traceback.print_exc()
             RESULTS["test2"] = False
 
@@ -675,7 +691,6 @@ def main():
             RESULTS["test3"] = test_3_real_hax_login(accounts)
         except Exception as e:
             print(f"\n❌ 测试 3 崩溃: {e}")
-            import traceback
             traceback.print_exc()
             RESULTS["test3"] = False
 
