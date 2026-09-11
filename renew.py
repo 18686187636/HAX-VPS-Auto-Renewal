@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (Cookie + requests 双重探测 - 修正版)
+HAX VPS Auto-Renewal (修正版 - CF判定修正 + Firefox cookie store 直写)
 """
 import os
 import sys
@@ -496,11 +496,11 @@ def _cookie_attr(c, attr, default=""):
     return getattr(c, attr, default)
 
 
-# ===================== ★ requests 探测（判定和测试 1 一致）=====================
+# ===================== ★ requests 探测（CF 判定修正）=====================
 def probe_cookie_with_requests(sess_value):
     """
     用纯 requests + PHPSESSID 直接测服务器端是否有效。
-    判定逻辑完全照抄 test_all.py 中已成功过的版本。
+    ★ CF 判定收紧：只有真正的挑战页才算 CF 拦截，判定优先级放最低。
     """
     proxies = get_proxies()
     headers = {
@@ -524,38 +524,42 @@ def probe_cookie_with_requests(sess_value):
     text = r.text
     text_lower = text.lower()
 
-    is_cf = (
-        "cf-challenge" in text_lower
-        or "just a moment" in text_lower
-        or "checking your browser" in text_lower
-        or "challenge-platform" in text_lower
-    )
+    # CF 判定：只匹配真正的挑战页特征
+    is_cf_title = "<title>just a moment" in text_lower
+    is_cf_short = len(text) < 5000 and "challenge-platform" in text_lower
+    is_cf = is_cf_title or is_cf_short
+
     has_logout = ("Logout" in text) or ("Log out" in text) or ("logout" in text)
     has_login_btn = ('>Login<' in text) or ('>login<' in text)
     has_valid_until = "Valid until" in text
     has_vps_info = "VPS Information" in text or "vps-info" in r.url
     redirected_to_login = "/login" in r.url
 
-    # 详细日志
     print(f"    [探测详情] CF={is_cf} Logout={has_logout} Login={has_login_btn} "
-          f"Valid={has_valid_until} VPSInfo={has_vps_info} 重定向到login={redirected_to_login}", flush=True)
+          f"Valid={has_valid_until} VPSInfo={has_vps_info} 重定向到login={redirected_to_login} "
+          f"len={len(text)}", flush=True)
 
-    if is_cf:
-        return False, f"Cloudflare 拦截 (HTTP {r.status_code})"
+    # ★ 优先判定成功：有 Logout / Valid until / VPS Information 就是有效
     if has_logout or has_valid_until or has_vps_info:
         return True, f"服务端有效 (HTTP {r.status_code})"
+
+    # 其次判定明确失败
     if redirected_to_login:
         return False, f"被重定向到 /login，session 已过期"
     if has_login_btn:
         return False, f"服务端拒绝 (HTTP {r.status_code})"
+
+    # 最后才判 CF
+    if is_cf:
+        return False, f"Cloudflare 拦截 (HTTP {r.status_code})"
+
     return False, f"状态不明 (HTTP {r.status_code}, final={r.url})"
 
 
-# ===================== ★ 核心：cookie 注入（多 API + 探测）=====================
+# ===================== ★ 核心：cookie 注入（多 API + Firefox cookie store）=====================
 def set_session_cookie(page, cookies_data):
     """
-    依次尝试所有可能的 cookie 注入 API，最后用 requests 探测服务端状态。
-    requests 探测失败不再阻断，仅作参考，让 is_logged_in 做最终判定。
+    依次尝试所有可能的 cookie 注入 API，并检查 Firefox cookie store。
     """
     cookies_list = normalize_cookies(cookies_data)
     if not cookies_list:
@@ -574,7 +578,7 @@ def set_session_cookie(page, cookies_data):
 
     print(f"  [COOKIE] 目标 PHPSESSID: {sess_value[:8]}...{sess_value[-4:]}", flush=True)
 
-    # ---- 0. ★ requests 探测（仅作参考，不阻断）----
+    # ---- 0. requests 探测（仅作参考，不阻断）----
     ok, info = probe_cookie_with_requests(sess_value)
     if ok:
         print(f"  [COOKIE] ✅ requests 探测：{info}", flush=True)
@@ -608,18 +612,39 @@ def set_session_cookie(page, cookies_data):
     except Exception as e:
         attempted.append(f"page.set_cookies ❌ ({e})")
 
-    # 2c. page.cookies = [...]
+    # 2c. ★ Firefox cookie store 直写
     try:
-        page.cookies = cookies_list
-        attempted.append("page.cookies= ✅")
+        browser = getattr(page, 'browser', None) or getattr(page, '_browser', None)
+        if browser is not None:
+            # 尝试各种可能的方法名
+            for method_name in ['set_cookies', 'add_cookies', 'add_cookie', 'set_cookie']:
+                m = getattr(browser, method_name, None)
+                if m is None:
+                    continue
+                try:
+                    m(cookies_list)
+                    attempted.append(f"page.browser.{method_name} ✅")
+                    break
+                except TypeError:
+                    # 可能只接受单个 cookie
+                    try:
+                        for c in cookies_list:
+                            m(c)
+                        attempted.append(f"page.browser.{method_name}(逐个) ✅")
+                        break
+                    except Exception as e2:
+                        attempted.append(f"page.browser.{method_name} ❌ ({e2})")
+                except Exception as e:
+                    attempted.append(f"page.browser.{method_name} ❌ ({e})")
     except Exception as e:
-        attempted.append(f"page.cookies= ❌ ({e})")
+        attempted.append(f"page.browser 直写 ❌ ({e})")
 
-    # 2d. page.cookies.extend
+    # 2d. page.cookies.extend（page.cookies 是 list）
     try:
-        page.cookies.clear()
-        page.cookies.extend(cookies_list)
-        attempted.append("page.cookies.extend ✅")
+        if isinstance(getattr(page, 'cookies', None), list):
+            page.cookies.clear()
+            page.cookies.extend(cookies_list)
+            attempted.append("page.cookies.extend ✅")
     except Exception as e:
         attempted.append(f"page.cookies.extend ❌ ({e})")
 
@@ -632,7 +657,7 @@ def set_session_cookie(page, cookies_data):
 
     print(f"  [COOKIE] 尝试结果: {attempted}", flush=True)
 
-    # ---- 3. 打印 document.cookie 和 driver cookie ----
+    # ---- 3. 打印 document.cookie ----
     try:
         doc = page.run_js("document.cookie") or ""
         m = re.search(r'PHPSESSID=([^;]+)', doc)
@@ -643,7 +668,8 @@ def set_session_cookie(page, cookies_data):
     except Exception:
         pass
 
-    for attr in ['driver', '_driver', 'browser', '_browser']:
+    # ---- 4. 检查 Firefox cookie store ----
+    for attr in ['browser', '_browser']:
         obj = getattr(page, attr, None)
         if obj is None:
             continue
@@ -654,6 +680,7 @@ def set_session_cookie(page, cookies_data):
             try:
                 val = g() if callable(g) else g
                 if isinstance(val, list):
+                    total = len(val)
                     hax = []
                     for c in val:
                         d = _cookie_attr(c, "domain", "")
@@ -661,7 +688,7 @@ def set_session_cookie(page, cookies_data):
                         p = _cookie_attr(c, "path", "")
                         if "hax.co.id" in str(d):
                             hax.append(f"{n}@{d}{p}")
-                    print(f"  [COOKIE] page.{attr}.{getter}() hax.co.id 下 {len(hax)} 个: {hax}", flush=True)
+                    print(f"  [COOKIE] page.{attr}.{getter}() 总计 {total} 个, hax.co.id 下 {len(hax)} 个: {hax}", flush=True)
             except Exception:
                 pass
 
@@ -1596,7 +1623,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (Cookie + requests 双重探测)", flush=True)
+    print("   HAX 自动续期 (CF 判定修正)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
