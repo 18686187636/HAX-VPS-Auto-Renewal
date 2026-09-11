@@ -1,0 +1,177 @@
+name: Test Cookie (all-in-one)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb firefox ffmpeg
+          pip install --upgrade pip
+          pip install requests ruyipage speechrecognition pydub
+          python -m ruyipage install
+
+      - name: Configure sing-box proxy
+        env:
+          NODE_LINK: ${{ secrets.NODE_LINK }}
+          SING_BOX_VERSION: "1.10.7"
+        run: |
+          set -e
+          if [ -z "$NODE_LINK" ]; then
+            echo "⚠️ NODE_LINK 未配置，跳过"
+            exit 0
+          fi
+
+          ARCH="$(uname -m)"
+          case "$ARCH" in
+            x86_64|amd64)  SB_ARCH="amd64" ;;
+            aarch64|arm64) SB_ARCH="arm64" ;;
+            *) echo "❌ 不支持的架构"; exit 1 ;;
+          esac
+
+          PKG="sing-box-${SING_BOX_VERSION}-linux-${SB_ARCH}"
+          URL="https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/${PKG}.tar.gz"
+
+          download_ok=0
+          for PREFIX in "" "https://ghfast.top/" "https://ghproxy.net/" "https://gh-proxy.com/"; do
+            if curl -fL --retry 3 --retry-delay 3 --connect-timeout 20 --max-time 180 \
+                 -o sing-box.tar.gz "${PREFIX}${URL}"; then
+              if file sing-box.tar.gz | grep -q 'gzip compressed data'; then
+                download_ok=1
+                break
+              else
+                rm -f sing-box.tar.gz
+              fi
+            fi
+          done
+          [ "$download_ok" = "1" ] || { echo "❌ 下载失败"; exit 1; }
+
+          tar -xzf sing-box.tar.gz
+          SING_BOX_DIR=$(find . -maxdepth 1 -type d -name "sing-box-*" | head -1)
+          sudo mv "$SING_BOX_DIR/sing-box" /usr/local/bin/
+          sudo chmod +x /usr/local/bin/sing-box
+          rm -rf sing-box.tar.gz "$SING_BOX_DIR"
+
+          python3 << 'PYEOF'
+          import json, sys, os, re
+          from urllib.parse import urlparse, parse_qs
+
+          link = os.environ.get('NODE_LINK', '')
+          if not link:
+              sys.exit(0)
+
+          parsed = urlparse(link)
+          netloc = parsed.netloc
+          if '@' in netloc:
+              uuid, host_port = netloc.split('@', 1)
+          else:
+              uuid, host_port = '', netloc
+
+          host = ''
+          port = '443'
+          bracket_match = re.match(r'^\[([^\]]+)\](?::(\d+))?$', host_port)
+          if bracket_match:
+              host = bracket_match.group(1)
+              if bracket_match.group(2):
+                  port = bracket_match.group(2)
+          else:
+              if host_port.count(':') > 1:
+                  host = host_port
+              elif ':' in host_port:
+                  host, port = host_port.split(':', 1)
+              else:
+                  host = host_port
+
+          params = parse_qs(parsed.query)
+          sni = params.get('sni', [''])[0] or host
+          fp = params.get('fp', [''])[0] or 'chrome'
+          flow = params.get('flow', [''])[0] or 'xtls-rprx-vision'
+          type_ = params.get('type', ['tcp'])[0]
+          security = params.get('security', [''])[0]
+          path = params.get('path', [''])[0]
+          host_header = params.get('host', [''])[0] or host
+
+          outbound = {
+              "type": "vless", "tag": "vless-out",
+              "server": host, "server_port": int(port),
+              "uuid": uuid, "flow": flow,
+              "packet_encoding": "packetaddr",
+          }
+          if security.lower() != 'none':
+              outbound["tls"] = {
+                  "enabled": True, "server_name": sni, "insecure": False,
+                  "utls": {"enabled": True, "fingerprint": fp}
+              }
+          if type_ != 'tcp':
+              transport = {"type": type_}
+              if type_ == 'ws':
+                  transport["path"] = path or "/"
+                  transport["headers"] = {"Host": host_header}
+              elif type_ == 'grpc':
+                  transport["service_name"] = path or ""
+              outbound["transport"] = transport
+          if security == 'reality':
+              pbk = params.get('pbk', [''])[0]
+              sid = params.get('sid', [''])[0]
+              outbound['tls']['reality'] = {
+                  "enabled": True, "public_key": pbk, "short_id": sid
+              }
+
+          config = {
+              "log": {"level": "warn"},
+              "inbounds": [
+                  {"type": "socks", "tag": "socks-in", "listen": "127.0.0.1", "listen_port": 1080},
+                  {"type": "http", "tag": "http-in", "listen": "127.0.0.1", "listen_port": 1081}
+              ],
+              "outbounds": [outbound],
+              "route": {"rules": [{"outbound": "vless-out", "protocol": ["tcp", "udp"]}]}
+          }
+          with open("sing-box-config.json", "w") as f:
+              json.dump(config, f, indent=2)
+          PYEOF
+
+          nohup sing-box -c sing-box-config.json run > sing-box.log 2>&1 &
+          sleep 5
+          netstat -tuln | grep -E ':1080|:1081'
+
+      - name: Run all tests
+        env:
+          ACCOUNTS_JSON: ${{ secrets.ACCOUNTS_JSON }}
+          PROXY_SERVER: ${{ secrets.NODE_LINK != '' && 'http://127.0.0.1:1081' || '' }}
+          BROWSER_UA: ${{ secrets.BROWSER_UA }}
+          HEADLESS: "true"
+          # 想跳过某个测试，改这里，例如 SKIP_TEST=2
+          SKIP_TEST: ""
+        run: |
+          xvfb-run --auto-servernum python3 test_all.py
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-artifacts
+          path: |
+            **/*.png
+            **/*.log
+          if-no-files-found: ignore
+
+      - name: Cleanup
+        if: always()
+        run: |
+          pkill -f sing-box || true
+          pkill -f firefox || true
+          pkill -f geckodriver || true
+          pkill -f Xvfb || true
