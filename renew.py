@@ -4,8 +4,8 @@
 HAX VPS Auto-Renewal (Cookie 修正版 - 完整)
 - 支持 session_token 为完整 cookie 数组（含 PHPSESSID 多 path）
 - 兼容旧格式（单一 PHPSESSID 字符串）
-- 修正 get_cookies() 返回 CookieInfo 对象的问题
-- 移除 user_agent 参数（ruyipage 不支持）
+- set_session_cookie 只做注入，不做严格 readback 判定，靠 is_logged_in 最终确认
+- readback 仅作为日志输出（ruyipage get_cookies 有局限）
 - 每个账号完成后 TG 通知剩余未完成列表
 - 失败账号自动重试，最多 5 轮
 """
@@ -509,7 +509,9 @@ def _cookie_attr(c, attr, default=""):
 
 def set_session_cookie(page, cookies_data):
     """
-    注入 cookie 并 readback 验证。
+    注入 cookie。
+    - 不做严格 readback 验证（ruyipage 的 get_cookies() 有局限）
+    - 真正的判定交给 is_logged_in()
     """
     cookies_list = normalize_cookies(cookies_data)
     if not cookies_list:
@@ -519,63 +521,72 @@ def set_session_cookie(page, cookies_data):
     names = [f"{c['name']}@{c.get('domain')}{c.get('path', '/')}" for c in cookies_list]
     print(f"  [COOKIE] 准备注入 {len(cookies_list)} 个: {names}", flush=True)
 
-    # 先访问目标域，确保 cookie 有归属
+    # ---- 1. 先访问 hax.co.id 根路径，让浏览器进入正确域 ----
     try:
-        page.get("https://hax.co.id/login")
-        page.wait.doc_loaded(timeout=15)
+        page.get("https://hax.co.id/")
+        page.wait.doc_loaded(timeout=20)
+        time.sleep(1)
+        print(f"  [COOKIE] 当前页面: {page.url}", flush=True)
     except Exception as e:
-        debug_print(f"预访问登录页失败: {e}")
+        debug_print(f"预访问首页失败: {e}")
 
-    # 优先走 ruyipage 原生 set_cookies
-    injected = False
+    # ---- 2. 尝试 set_cookies（原生方法）----
+    set_ok = False
     try:
         page.set_cookies(cookies_list)
-        print(f"  [COOKIE] set_cookies 调用成功", flush=True)
-        injected = True
+        print(f"  [COOKIE] set_cookies(domain/path) 调用成功", flush=True)
+        set_ok = True
     except Exception as e:
-        print(f"  [COOKIE] set_cookies 异常: {e}", flush=True)
+        print(f"  [COOKIE] set_cookies(domain/path) 异常: {e}", flush=True)
 
-    # 兜底：JS 逐个注入
-    if not injected:
-        ok_count = 0
-        for c in cookies_list:
-            try:
-                secure_flag = "; Secure" if c.get("secure") else ""
-                js = (f"document.cookie = '{c['name']}={c['value']}; "
-                      f"path={c.get('path', '/')}; "
-                      f"domain={c.get('domain', 'hax.co.id')}"
-                      f"{secure_flag}; SameSite=Lax';")
-                page.run_js(js)
-                ok_count += 1
-            except Exception as e:
-                debug_print(f"JS 注入 {c.get('name')} 失败: {e}")
-        print(f"  [COOKIE] JS 注入 {ok_count}/{len(cookies_list)} 个", flush=True)
+    # ---- 2b. 如果失败，用 url 字段重试 ----
+    if not set_ok:
+        try:
+            cookies_with_url = []
+            for c in cookies_list:
+                nc = dict(c)
+                dom = c.get("domain", "hax.co.id").lstrip(".")
+                pth = c.get("path", "/")
+                nc["url"] = f"https://{dom}{pth}"
+                cookies_with_url.append(nc)
+            page.set_cookies(cookies_with_url)
+            print(f"  [COOKIE] set_cookies(url) 调用成功", flush=True)
+            set_ok = True
+        except Exception as e:
+            print(f"  [COOKIE] set_cookies(url) 异常: {e}", flush=True)
 
-    # readback：兼容 CookieInfo 对象
+    # ---- 3. 无论 set_cookies 成功与否，都用 JS 兜底再写一遍 ----
+    #      PHPSESSID 不是 httpOnly，JS 可以直接设置
+    js_ok_count = 0
+    for c in cookies_list:
+        try:
+            js = (f"document.cookie = '{c['name']}={c['value']}; "
+                  f"path={c.get('path', '/')}; "
+                  f"domain={c.get('domain', 'hax.co.id')}; SameSite=Lax';")
+            page.run_js(js)
+            js_ok_count += 1
+        except Exception as e:
+            debug_print(f"JS 注入 {c.get('name')} 失败: {e}")
+    print(f"  [COOKIE] JS 兜底注入 {js_ok_count}/{len(cookies_list)} 个", flush=True)
+
+    # ---- 4. readback 只做日志，不做判定 ----
     try:
         readback = page.get_cookies()
+        found = []
+        for c in readback:
+            d = str(_cookie_attr(c, "domain", ""))
+            n = str(_cookie_attr(c, "name", ""))
+            if "hax.co.id" in d:
+                found.append(f"{n}@{d}")
+        if found:
+            print(f"  [COOKIE] readback: {len(found)} 个 ({found})", flush=True)
+        else:
+            print(f"  [COOKIE] readback: 0 个（API 局限，忽略，靠 is_logged_in 判定）", flush=True)
     except Exception as e:
-        debug_print(f"get_cookies 失败: {e}")
-        readback = []
+        debug_print(f"readback 失败（忽略）: {e}")
 
-    found_names = []
-    for c in readback:
-        d = _cookie_attr(c, "domain", "")
-        if "hax.co.id" in str(d):
-            n = _cookie_attr(c, "name", "")
-            p = _cookie_attr(c, "path", "/")
-            found_names.append(f"{n}@{d}{p}")
-
-    print(f"  [COOKIE] 浏览器实际持有 hax.co.id 下 {len(found_names)} 个 cookie:", flush=True)
-    for n in found_names:
-        print(f"      - {n}", flush=True)
-
-    has_sess = any("PHPSESSID" in n for n in found_names)
-    if has_sess:
-        print(f"  [COOKIE] ✅ PHPSESSID 注入成功", flush=True)
-        return True
-    print(f"  [COOKIE] ❌ PHPSESSID 未找到，注入失败", flush=True)
-    return False
+    # ---- 5. 只要有一个路径没抛异常，就返回 True，让 is_logged_in 做最终判定 ----
+    return True
 
 
 # ===================== Telegram OAuth 登录（保留兜底） =====================
@@ -1196,6 +1207,7 @@ def renew_account(account):
             cookie_ok = set_session_cookie(page, session_token)
             if cookie_ok:
                 debug_print("Cookie 注入完成，跳转 vps-info")
+                time.sleep(2)  # ★ 等 cookie 生效
                 page.get("https://hax.co.id/vps-info")
                 page.wait.doc_loaded(timeout=15)
                 page.wait(2)
