@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (诊断版 - 打印 988 字节响应内容)
+HAX VPS Auto-Renewal (网络重试版)
 """
 import os
 import sys
@@ -38,6 +38,11 @@ SEND_SCREENSHOTS = os.getenv("SEND_SCREENSHOTS", "true").lower() == "true"
 NOTIFY_PROGRESS = os.getenv("NOTIFY_PROGRESS", "true").lower() == "true"
 SKIP_THRESHOLD_HOURS = float(os.getenv("SKIP_THRESHOLD_HOURS", "96"))
 MAX_RENEW_ROUNDS = int(os.getenv("MAX_RENEW_ROUNDS", "5"))
+
+# 网络重试
+NAV_RETRY = int(os.getenv("NAV_RETRY", "3"))
+NAV_RETRY_DELAY = int(os.getenv("NAV_RETRY_DELAY", "10"))
+REQ_RETRY = int(os.getenv("REQ_RETRY", "3"))
 
 IGNORE_COOKIE_NAMES = {
     "_ga", "_gid", "_gat_gtag_UA_179253361_1", "_ga_MK6PLQ755F",
@@ -80,7 +85,8 @@ def get_proxies():
     return None
 
 
-def check_proxy_ip(proxies):
+def check_proxy_ip(proxies, retry=3):
+    """检测代理出口 IP，带重试"""
     if not proxies:
         return False, None
     services = [
@@ -88,17 +94,41 @@ def check_proxy_ip(proxies):
         'https://ip.sb/json',
         'https://httpbin.org/ip'
     ]
-    for url in services:
-        try:
-            resp = req_lib.get(url, proxies=proxies, timeout=10)
-            if resp.status_code == 200:
-                data = resp.json()
-                ip = data.get('ip') or data.get('origin')
-                if ip:
-                    return True, ip
-        except Exception:
-            continue
+    for attempt in range(retry):
+        for url in services:
+            try:
+                resp = req_lib.get(url, proxies=proxies, timeout=15)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    ip = data.get('ip') or data.get('origin')
+                    if ip:
+                        return True, ip
+            except Exception:
+                continue
+        if attempt < retry - 1:
+            time.sleep(5)
     return False, None
+
+
+# ===================== 浏览器安全导航（★ 新增） =====================
+def safe_get(page, url, retry=NAV_RETRY, delay=NAV_RETRY_DELAY, timeout=20):
+    """
+    包装 page.get，失败自动重试。
+    返回 True/False。
+    """
+    for attempt in range(retry):
+        try:
+            page.get(url)
+            page.wait.doc_loaded(timeout=timeout)
+            return True
+        except Exception as e:
+            err = str(e)
+            is_timeout = ("timeout" in err.lower() or "超时" in err)
+            print(f"  [NAV] page.get({url}) 第{attempt+1}/{retry}次失败: "
+                  f"{'超时' if is_timeout else err[:100]}", flush=True)
+            if attempt < retry - 1:
+                time.sleep(delay)
+    return False
 
 
 # ===================== 工具函数 =====================
@@ -492,11 +522,11 @@ def _cookie_attr(c, attr, default=""):
     return getattr(c, attr, default)
 
 
-# ===================== ★ requests 探测（打印完整响应）=====================
-def probe_cookie_with_requests(sess_value):
+# ===================== requests 探测（带重试）=====================
+def probe_cookie_with_requests(sess_value, retry=REQ_RETRY):
     """
     用 requests + PHPSESSID 测服务器端。
-    ★ 打印完整响应内容（前 1000 字符）帮助定位。
+    失败时自动重试。
     """
     proxies = get_proxies()
     headers = {
@@ -505,50 +535,52 @@ def probe_cookie_with_requests(sess_value):
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         "Referer": "https://hax.co.id/login",
     }
-    try:
-        r = req_lib.get(
-            "https://hax.co.id/vps-info",
-            cookies={"PHPSESSID": sess_value},
-            headers=headers,
-            proxies=proxies,
-            allow_redirects=True,
-            timeout=30,
-        )
-    except Exception as e:
-        return False, f"requests 异常: {e}"
 
-    text = r.text
-    text_lower = text.lower()
+    last_err = None
+    for attempt in range(retry):
+        try:
+            r = req_lib.get(
+                "https://hax.co.id/vps-info",
+                cookies={"PHPSESSID": sess_value},
+                headers=headers,
+                proxies=proxies,
+                allow_redirects=True,
+                timeout=30,
+            )
+            # 成功
+            text = r.text
+            text_lower = text.lower()
+            print(f"    [探测] HTTP {r.status_code}, final={r.url}, len={len(text)}", flush=True)
 
-    # ★ 打印完整响应
-    print(f"    [探测] HTTP {r.status_code}, final={r.url}, len={len(text)}", flush=True)
-    print(f"    [探测] 响应头: {dict(r.headers)}", flush=True)
-    print(f"    [探测] 响应体前 500 字符:\n{text[:500]}", flush=True)
+            # 明确失效标志
+            has_redirect_to_login = ('http-equiv="refresh"' in text_lower
+                                     and '/login' in text_lower)
+            has_logout = ("Logout" in text) or ("Log out" in text)
+            has_valid_until = "Valid until" in text
+            has_vps_title = "VPS Information" in text
 
-    is_cf_title = "<title>just a moment" in text_lower
-    is_cf_short = len(text) < 5000 and "challenge-platform" in text_lower
-    is_cf = is_cf_title or is_cf_short
+            if has_redirect_to_login:
+                return False, f"session 过期（重定向到 /login）"
+            if has_logout or has_valid_until or has_vps_title:
+                return True, f"服务端有效 (HTTP {r.status_code}, len={len(text)})"
 
-    has_logout = ("Logout" in text) or ("Log out" in text) or ("logout" in text)
-    has_valid_until = "Valid until" in text
-    has_vps_info = "VPS Information" in text or "vps-info" in r.url
+            # 短页面 + 无任何特征 = 状态不明
+            if len(text) < 2000:
+                return False, f"状态不明 (HTTP {r.status_code}, len={len(text)})"
 
-    if has_logout or has_valid_until or has_vps_info:
-        return True, f"服务端有效 (HTTP {r.status_code})"
-    if is_cf:
-        return False, f"Cloudflare 拦截 (HTTP {r.status_code})"
-    return False, f"状态不明 (HTTP {r.status_code}, len={len(text)})"
+            return True, f"服务端有效 (HTTP {r.status_code}, len={len(text)})"
+
+        except Exception as e:
+            last_err = str(e)
+            if attempt < retry - 1:
+                print(f"    [探测] 第{attempt+1}/{retry}次请求失败: {last_err[:80]}，{5}s 后重试", flush=True)
+                time.sleep(5)
+
+    return False, f"requests 异常: {last_err[:100]}"
 
 
-# ===================== Cookie 注入（只调 set_cookies + JS）=====================
+# ===================== Cookie 注入 =====================
 def set_session_cookie(page, cookies_data):
-    """
-    ★ 回到测试 3 的成功流程：
-      1. page.get("/login")
-      2. page.set_cookies(cookies_list)
-      3. JS document.cookie 兜底
-      不做 XHR 探测（避免超时）
-    """
     cookies_list = normalize_cookies(cookies_data)
     if not cookies_list:
         print("  [COOKIE] ⚠️ cookie 数据为空或格式不支持", flush=True)
@@ -566,21 +598,19 @@ def set_session_cookie(page, cookies_data):
 
     print(f"  [COOKIE] 目标 PHPSESSID: {sess_value[:8]}...{sess_value[-4:]}", flush=True)
 
-    # ---- 0. requests 探测 ----
+    # ---- 0. requests 探测（带重试）----
     ok, info = probe_cookie_with_requests(sess_value)
     if ok:
         print(f"  [COOKIE] ✅ requests 探测：{info}", flush=True)
     else:
         print(f"  [COOKIE] ⚠️ requests 探测：{info}（继续尝试浏览器注入）", flush=True)
 
-    # ---- 1. 访问 /login ----
-    try:
-        page.get("https://hax.co.id/login")
-        page.wait.doc_loaded(timeout=20)
-        time.sleep(2)
-        print(f"  [COOKIE] 当前页面: {page.url}", flush=True)
-    except Exception as e:
-        debug_print(f"预访问 /login 失败: {e}")
+    # ---- 1. 访问 /login（带重试）----
+    if not safe_get(page, "https://hax.co.id/login", timeout=20):
+        print(f"  [COOKIE] ❌ 访问 /login 三次都失败，判定为网络故障", flush=True)
+        return False
+    time.sleep(2)
+    print(f"  [COOKIE] 当前页面: {page.url}", flush=True)
 
     # ---- 2. 只调 page.set_cookies ----
     try:
@@ -597,7 +627,6 @@ def set_session_cookie(page, cookies_data):
     except Exception as e:
         print(f"  [COOKIE] ⚠️ JS 注入失败: {e}", flush=True)
 
-    # ---- 4. 不做 XHR，直接返回（让 renew_account 里判断登录态）----
     return True
 
 
@@ -1207,8 +1236,8 @@ def renew_account(account):
         page = launch(**launch_args)
 
         debug_print("浏览器启动成功")
-        page.get("https://hax.co.id/login")
-        page.wait.doc_loaded(timeout=20)
+        if not safe_get(page, "https://hax.co.id/login", timeout=20):
+            raise RuntimeError("访问 /login 三次都失败")
         page.wait(3)
 
         # ---------- Cookie 登录 ----------
@@ -1220,11 +1249,11 @@ def renew_account(account):
             if cookie_ok:
                 debug_print("Cookie 注入完成，验证登录态")
                 time.sleep(1)
-                page.get("https://hax.co.id/vps-info")
-                page.wait.doc_loaded(timeout=15)
+                if not safe_get(page, "https://hax.co.id/vps-info", timeout=20):
+                    raise RuntimeError("访问 vps-info 三次都失败（网络问题）")
                 page.wait(2)
-                page.get("https://hax.co.id/vps-info")
-                page.wait.doc_loaded(timeout=15)
+                if not safe_get(page, "https://hax.co.id/vps-info", timeout=20):
+                    raise RuntimeError("再次访问 vps-info 失败")
                 page.wait(2)
                 if is_logged_in(page):
                     print("  ✅ Cookie 登录成功", flush=True)
@@ -1248,8 +1277,7 @@ def renew_account(account):
 
         if not is_logged_in(page):
             print("  ⚠️ 登录后未检测到登录状态，重新加载...", flush=True)
-            page.get("https://hax.co.id/vps-info")
-            page.wait.doc_loaded(timeout=15)
+            safe_get(page, "https://hax.co.id/vps-info", timeout=15)
             if not is_logged_in(page):
                 raise RuntimeError("无法确认登录状态")
 
@@ -1266,8 +1294,7 @@ def renew_account(account):
 
         # ---------- 检测是否需要续期 ----------
         if "hax.co.id/vps-info" not in (page.url or ""):
-            page.get("https://hax.co.id/vps-info")
-            page.wait.doc_loaded(timeout=15)
+            safe_get(page, "https://hax.co.id/vps-info", timeout=15)
         page.wait(2)
         try:
             should_renew, valid_until, remaining_hours = check_should_renew(page)
@@ -1529,7 +1556,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (诊断版 - 打印请求响应)", flush=True)
+    print("   HAX 自动续期 (网络重试版)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
@@ -1623,8 +1650,11 @@ if __name__ == "__main__":
                 except Exception as e:
                     print(f"  [NOTIFY] 进度通知失败: {e}", flush=True)
 
+            # ★ 账号之间加大延迟（60-120 秒），避免代理抽风
             if i_in_round < len(accounts_this_round):
-                time.sleep(random.randint(10, 30))
+                delay = random.randint(60, 120)
+                print(f"  等待 {delay} 秒后处理下一个账号...", flush=True)
+                time.sleep(delay)
 
         pending = failed_in_round
 
