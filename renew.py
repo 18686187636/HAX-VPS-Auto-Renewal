@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (Cookie 修正版 - JS 覆盖 PHPSESSID)
-- 用 JS document.cookie 直接覆盖 PHPSESSID（不加 domain，避免浏览器拒绝）
-- 注入后立即从 document.cookie 反查验证
-- 每个账号完成后 TG 通知剩余未完成列表
-- 失败账号自动重试，最多 5 轮
+HAX VPS Auto-Renewal (Cookie + requests 双重探测)
 """
 import os
 import sys
@@ -486,7 +482,6 @@ def normalize_cookies(cookies_data):
                 continue
             seen_php = True
         uniq.append(c)
-    # 如果 PHPSESSID 没有 path=/，用任意一个
     if not seen_php:
         for c in result:
             if c["name"] == "PHPSESSID":
@@ -502,12 +497,46 @@ def _cookie_attr(c, attr, default=""):
     return getattr(c, attr, default)
 
 
-# ===================== ★ 核心修复：JS 覆盖 PHPSESSID =====================
+# ===================== ★ requests 探测（新增）=====================
+def probe_cookie_with_requests(sess_value):
+    """
+    用纯 requests + PHPSESSID 直接测服务器端是否有效。
+    返回 (ok: bool, info: str)
+    """
+    proxies = get_proxies()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:155.0) Gecko/20100101 Firefox/155.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Referer": "https://hax.co.id/login",
+    }
+    try:
+        r = req_lib.get(
+            "https://hax.co.id/vps-info",
+            cookies={"PHPSESSID": sess_value},
+            headers=headers,
+            proxies=proxies,
+            allow_redirects=True,
+            timeout=30,
+        )
+    except Exception as e:
+        return False, f"requests 异常: {e}"
+
+    text = r.text
+    if ("Valid until" in text) or ("Logout" in text) or ("Log out" in text):
+        return True, f"服务端有效 (HTTP {r.status_code})"
+    if ('>Login<' in text) or ("Log in" in text and "Logout" not in text):
+        return False, f"服务端拒绝（session 已过期）(HTTP {r.status_code})"
+    # Cloudflare 挑战
+    if "just a moment" in text.lower() or "cf-challenge" in text.lower():
+        return False, f"Cloudflare 拦截 (HTTP {r.status_code})"
+    return False, f"状态不明 (HTTP {r.status_code}, final={r.url})"
+
+
+# ===================== ★ 核心：cookie 注入（多 API + 探测）=====================
 def set_session_cookie(page, cookies_data):
     """
-    用 JS document.cookie 直接覆盖 PHPSESSID。
-    关键：不加 domain（浏览器用当前域 hax.co.id），只设 path。
-    注入后立即反查 document.cookie 验证。
+    依次尝试所有可能的 cookie 注入 API，最后用 requests 探测服务端状态。
     """
     cookies_list = normalize_cookies(cookies_data)
     if not cookies_list:
@@ -527,6 +556,15 @@ def set_session_cookie(page, cookies_data):
 
     print(f"  [COOKIE] 目标 PHPSESSID: {sess_value[:8]}...{sess_value[-4:]}", flush=True)
 
+    # ---- 0. ★ 先用 requests 探测 cookie 是否在服务端有效 ----
+    ok, info = probe_cookie_with_requests(sess_value)
+    if ok:
+        print(f"  [COOKIE] ✅ requests 探测：{info}", flush=True)
+    else:
+        print(f"  [COOKIE] ❌ requests 探测：{info}", flush=True)
+        print(f"  [COOKIE] → 该 PHPSESSID 已在服务端失效，必须重新登录 HAX 导出", flush=True)
+        return False
+
     # ---- 1. 访问 /login ----
     try:
         page.get("https://hax.co.id/login")
@@ -536,61 +574,83 @@ def set_session_cookie(page, cookies_data):
     except Exception as e:
         debug_print(f"预访问 /login 失败: {e}")
 
-    # ---- 2. 打印注入前 document.cookie ----
+    # ---- 2. 依次尝试所有注入 API ----
+    attempted = []
+
+    # 2a. page.set.cookies()
     try:
-        before = page.run_js("document.cookie") or ""
-        m = re.search(r'PHPSESSID=([^;]+)', before)
-        if m:
-            print(f"  [COOKIE] 注入前已有 PHPSESSID: {m.group(1)[:8]}...{m.group(1)[-4:]}", flush=True)
-        else:
-            print(f"  [COOKIE] 注入前没有 PHPSESSID", flush=True)
-    except Exception:
-        pass
-
-    # ---- 3. 用 JS 覆盖 PHPSESSID（不加 domain）----
-    js_ok = False
-    for js_path in ["/", "/vps-info", "/login"]:
-        try:
-            js = f"document.cookie = 'PHPSESSID={sess_value}; path={js_path}';"
-            page.run_js(js)
-            time.sleep(0.3)
-            after = page.run_js("document.cookie") or ""
-            if sess_value in after:
-                print(f"  [COOKIE] ✅ JS 注入生效 (path={js_path})", flush=True)
-                js_ok = True
-            else:
-                debug_print(f"path={js_path} 未生效")
-        except Exception as e:
-            print(f"  [COOKIE] JS 注入 path={js_path} 异常: {e}", flush=True)
-
-    if not js_ok:
-        print(f"  [COOKIE] ❌ 所有 path 都注入失败", flush=True)
-        return False
-
-    # ---- 4. 验证 document.cookie ----
-    try:
-        after = page.run_js("document.cookie") or ""
-        m = re.search(r'PHPSESSID=([^;]+)', after)
-        if m:
-            got = m.group(1)
-            if got == sess_value:
-                print(f"  [COOKIE] ✅ document.cookie 中 PHPSESSID 与目标一致", flush=True)
-            else:
-                print(f"  [COOKIE] ⚠️ document.cookie 中 PHPSESSID 与目标不一致: {got[:8]}...", flush=True)
-                return False
-        else:
-            print(f"  [COOKIE] ❌ document.cookie 中没有 PHPSESSID", flush=True)
-            return False
+        if hasattr(page, 'set') and hasattr(page.set, 'cookies'):
+            page.set.cookies(cookies_list)
+            attempted.append("page.set.cookies ✅")
     except Exception as e:
-        print(f"  [COOKIE] 读取 document.cookie 失败: {e}", flush=True)
-        return False
+        attempted.append(f"page.set.cookies ❌ ({e})")
 
-    # ---- 5. 顺便调一次 page.set_cookies（虽然大概率无效）----
+    # 2b. page.set_cookies()
     try:
         page.set_cookies(cookies_list)
+        attempted.append("page.set_cookies ✅")
+    except Exception as e:
+        attempted.append(f"page.set_cookies ❌ ({e})")
+
+    # 2c. page.cookies = [...]
+    try:
+        page.cookies = cookies_list
+        attempted.append("page.cookies= ✅")
+    except Exception as e:
+        attempted.append(f"page.cookies= ❌ ({e})")
+
+    # 2d. page.cookies.extend
+    try:
+        page.cookies.clear()
+        page.cookies.extend(cookies_list)
+        attempted.append("page.cookies.extend ✅")
+    except Exception as e:
+        attempted.append(f"page.cookies.extend ❌ ({e})")
+
+    # 2e. JS document.cookie
+    try:
+        page.run_js(f"document.cookie = 'PHPSESSID={sess_value}; path=/';")
+        attempted.append("JS document.cookie ✅")
+    except Exception as e:
+        attempted.append(f"JS document.cookie ❌ ({e})")
+
+    print(f"  [COOKIE] 尝试结果: {attempted}", flush=True)
+
+    # ---- 3. 打印 document.cookie 和 driver cookie ----
+    try:
+        doc = page.run_js("document.cookie") or ""
+        m = re.search(r'PHPSESSID=([^;]+)', doc)
+        if m:
+            print(f"  [COOKIE] document.cookie 中 PHPSESSID: {m.group(1)[:8]}...{m.group(1)[-4:]}", flush=True)
+        else:
+            print(f"  [COOKIE] document.cookie 中没有 PHPSESSID", flush=True)
     except Exception:
         pass
 
+    # 尝试读 driver cookies
+    for attr in ['driver', '_driver', 'browser', '_browser']:
+        obj = getattr(page, attr, None)
+        if obj is None:
+            continue
+        for getter in ['get_cookies', 'cookies']:
+            g = getattr(obj, getter, None)
+            if g is None:
+                continue
+            try:
+                val = g() if callable(g) else g
+                if isinstance(val, list):
+                    hax = []
+                    for c in val:
+                        d = _cookie_attr(c, "domain", "")
+                        n = _cookie_attr(c, "name", "")
+                        p = _cookie_attr(c, "path", "")
+                        if "hax.co.id" in str(d):
+                            hax.append(f"{n}@{d}{p}")
+                    print(f"  [COOKIE] page.{attr}.{getter}() hax.co.id 下 {len(hax)} 个: {hax}", flush=True)
+            except Exception:
+                pass
+
+    # ---- 4. 返回 True，让 is_logged_in 最终判定 ----
     return True
 
 
@@ -1200,7 +1260,6 @@ def renew_account(account):
         page = launch(**launch_args)
 
         debug_print("浏览器启动成功")
-        # 先访问 /login
         page.get("https://hax.co.id/login")
         page.wait.doc_loaded(timeout=20)
         page.wait(3)
@@ -1231,7 +1290,9 @@ def renew_account(account):
                     except Exception:
                         pass
             else:
-                print("  ⚠️ Cookie 注入失败，尝试 OAuth", flush=True)
+                print("  ⚠️ Cookie 探测失败（服务端已失效），跳过 OAuth 直接失败", flush=True)
+                # 主动跳过 OAuth（因为 cookie 已失效，OAuth 也无意义）
+                raise RuntimeError("PHPSESSID 已过期，需要重新导出")
 
         if not login_success:
             debug_print("执行 OAuth 兜底")
@@ -1523,7 +1584,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (JS 覆盖 PHPSESSID)", flush=True)
+    print("   HAX 自动续期 (Cookie + requests 双重探测)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
