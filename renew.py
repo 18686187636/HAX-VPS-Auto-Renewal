@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (回退测试 3 成功逻辑)
+HAX VPS Auto-Renewal (page.set.headers 注入 Cookie)
 """
 import os
 import sys
@@ -434,13 +434,9 @@ def is_logged_in(page):
         return False
 
 
-# ===================== ★ Cookie 规范化（回退到测试 3 成功版本）=====================
+# ===================== Cookie 规范化 =====================
 def normalize_cookies(cookies_data):
-    """
-    ★ 关键：保留原始 domain（含前缀点）+ 保留所有 PHPSESSID（path=/ 和 /vps-info）
-    """
     if isinstance(cookies_data, str):
-        # 老格式字符串，扩展成两个 PHPSESSID
         return [
             {"name": "PHPSESSID", "value": cookies_data,
              "domain": ".hax.co.id", "path": "/"},
@@ -468,7 +464,7 @@ def normalize_cookies(cookies_data):
         nc = {
             "name": str(name),
             "value": str(value),
-            "domain": domain,  # ★ 保留原始 domain，不 lstrip
+            "domain": domain,
             "path": str(c.get("path", "/")),
         }
         exp = c.get("expirationDate") or c.get("expires")
@@ -479,7 +475,6 @@ def normalize_cookies(cookies_data):
                 pass
         result.append(nc)
 
-    # 去重（name + domain + path），★ 不删 /vps-info 的 PHPSESSID
     seen = set()
     uniq = []
     for c in result:
@@ -528,6 +523,9 @@ def probe_cookie_with_requests(sess_value):
     has_valid_until = "Valid until" in text
     has_vps_info = "VPS Information" in text or "vps-info" in r.url
 
+    print(f"    [探测详情] CF={is_cf} Logout={has_logout} Valid={has_valid_until} "
+          f"VPSInfo={has_vps_info} len={len(text)}", flush=True)
+
     if has_logout or has_valid_until or has_vps_info:
         return True, f"服务端有效 (HTTP {r.status_code})"
     if is_cf:
@@ -535,38 +533,94 @@ def probe_cookie_with_requests(sess_value):
     return False, f"状态不明 (HTTP {r.status_code})"
 
 
-# ===================== ★ Cookie 注入（回退到测试 3 成功版本）=====================
+# ===================== ★ Cookie 注入（page.set.headers）=====================
 def set_session_cookie(page, cookies_data):
     """
-    ★ 完全照抄测试 3 的成功流程：
-      1. page.get("https://hax.co.id/login")
-      2. page.set_cookies(cookies_list)
-      3. 不做任何额外操作
+    用 page.set.headers 直接注入 Cookie 请求头，绕过 Firefox cookie jar。
     """
     cookies_list = normalize_cookies(cookies_data)
     if not cookies_list:
         print("  [COOKIE] ⚠️ cookie 数据为空或格式不支持", flush=True)
         return False
 
-    names = [f"{c['name']}@{c.get('domain')}{c.get('path', '/')}" for c in cookies_list]
-    print(f"  [COOKIE] 准备注入 {len(cookies_list)} 个: {names}", flush=True)
+    sess_value = None
+    for c in cookies_list:
+        if c["name"] == "PHPSESSID":
+            sess_value = c["value"]
+            break
+
+    if not sess_value:
+        print("  [COOKIE] ⚠️ 没有 PHPSESSID，无法注入", flush=True)
+        return False
+
+    print(f"  [COOKIE] 目标 PHPSESSID: {sess_value[:8]}...{sess_value[-4:]}", flush=True)
 
     # ---- 1. 访问 /login ----
     try:
         page.get("https://hax.co.id/login")
         page.wait.doc_loaded(timeout=20)
-        time.sleep(3)
+        time.sleep(2)
         print(f"  [COOKIE] 当前页面: {page.url}", flush=True)
     except Exception as e:
         debug_print(f"预访问 /login 失败: {e}")
 
-    # ---- 2. 只调 page.set_cookies（唯一有效方法）----
+    # ---- 2. ★ page.set.headers 注入 Cookie 请求头 ----
+    try:
+        page.set.headers({"Cookie": f"PHPSESSID={sess_value}"})
+        print(f"  [COOKIE] ✅ page.set.headers 注入 Cookie 请求头成功", flush=True)
+    except Exception as e:
+        print(f"  [COOKIE] ⚠️ page.set.headers 失败: {e}（继续尝试其他方式）", flush=True)
+
+    # ---- 3. page.set_cookies 兜底 ----
     try:
         page.set_cookies(cookies_list)
         print(f"  [COOKIE] ✅ page.set_cookies 调用成功", flush=True)
     except Exception as e:
-        print(f"  [COOKIE] ❌ page.set_cookies 失败: {e}", flush=True)
-        return False
+        print(f"  [COOKIE] ⚠️ page.set_cookies 失败: {e}", flush=True)
+
+    # ---- 4. JS 注入 ----
+    try:
+        page.run_js(f"document.cookie = 'PHPSESSID={sess_value}; path=/; SameSite=Lax';")
+        print(f"  [COOKIE] ✅ JS document.cookie 注入完成", flush=True)
+    except Exception as e:
+        print(f"  [COOKIE] ⚠️ JS 注入失败: {e}", flush=True)
+
+    # ---- 5. XHR 探测 + 打印响应预览 ----
+    try:
+        js_code = """
+        (function() {
+            try {
+                var xhr = new XMLHttpRequest();
+                xhr.open('GET', 'https://hax.co.id/vps-info', false);
+                xhr.send();
+                var t = xhr.responseText || '';
+                return JSON.stringify({
+                    status: xhr.status,
+                    len: t.length,
+                    preview: t.substring(0, 300),
+                    finalUrl: xhr.responseURL || '',
+                    docCookieHasSess: document.cookie.indexOf('PHPSESSID=%s') >= 0
+                });
+            } catch(e) {
+                return JSON.stringify({error: String(e)});
+            }
+        })()
+        """ % sess_value
+        xhr_result = page.run_js(js_code)
+        print(f"  [COOKIE] XHR 探测 /vps-info: {xhr_result}", flush=True)
+    except Exception as e:
+        print(f"  [COOKIE] XHR 探测失败: {e}", flush=True)
+
+    # ---- 6. 刷新 vps-info 看结果 ----
+    try:
+        page.get("https://hax.co.id/vps-info")
+        page.wait.doc_loaded(timeout=15)
+        time.sleep(2)
+        snippet = page.run_js("document.body.innerText.substring(0, 200)") or ""
+        snippet_oneline = snippet.replace("\n", " ")[:150]
+        print(f"  [COOKIE] 刷新 vps-info 后: {snippet_oneline}", flush=True)
+    except Exception as e:
+        print(f"  [COOKIE] 刷新失败: {e}", flush=True)
 
     return True
 
@@ -1188,7 +1242,7 @@ def renew_account(account):
             print("  [LOGIN] 尝试使用 session_token 快速登录...", flush=True)
             cookie_ok = set_session_cookie(page, session_token)
             if cookie_ok:
-                debug_print("Cookie 注入完成，跳转 vps-info")
+                debug_print("Cookie 注入完成，验证登录态")
                 time.sleep(1)
                 page.get("https://hax.co.id/vps-info")
                 page.wait.doc_loaded(timeout=15)
@@ -1499,7 +1553,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (回退测试 3 成功逻辑)", flush=True)
+    print("   HAX 自动续期 (page.set.headers 注入 Cookie)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
