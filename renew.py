@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (Cookie 修正版 - 回退测试 3 成功流程)
+HAX VPS Auto-Renewal (Cookie 修正版 - JS 覆盖 PHPSESSID)
+- 用 JS document.cookie 直接覆盖 PHPSESSID（不加 domain，避免浏览器拒绝）
+- 注入后立即从 document.cookie 反查验证
+- 每个账号完成后 TG 通知剩余未完成列表
+- 失败账号自动重试，最多 5 轮
 """
 import os
 import sys
@@ -437,10 +441,8 @@ def is_logged_in(page):
 # ===================== Cookie 规范化 =====================
 def normalize_cookies(cookies_data):
     if isinstance(cookies_data, str):
-        return [
-            {"name": "PHPSESSID", "value": cookies_data,
-             "domain": "hax.co.id", "path": "/"},
-        ]
+        return [{"name": "PHPSESSID", "value": cookies_data,
+                 "domain": "hax.co.id", "path": "/"}]
 
     if not isinstance(cookies_data, list):
         return []
@@ -473,30 +475,23 @@ def normalize_cookies(cookies_data):
                 pass
         result.append(nc)
 
-    # ★ 去重：只保留 path=/ 的一个 PHPSESSID（避免 path 冲突）
-    #   如果只有一个 PHPSESSID 落在 /vps-info，也要保留
-    seen_names = set()
+    # 只保留一个 PHPSESSID（path=/ 优先）
     uniq = []
-    # 先处理 path=/
-    for c in result:
-        if c["name"] == "PHPSESSID" and c["path"] == "/":
-            uniq.append(c)
-            seen_names.add(c["name"])
-            break
-    # 再加其他 cookie（非 PHPSESSID）
+    seen_php = False
     for c in result:
         if c["name"] == "PHPSESSID":
-            continue
-        key = (c["name"], c["domain"], c["path"])
-        if key in seen_names:
-            continue
-        seen_names.add(key)
+            if seen_php:
+                continue
+            if c["path"] != "/":
+                continue
+            seen_php = True
         uniq.append(c)
-    # 如果 PHPSESSID 没有 path=/ 的，取任意一个
-    if not any(c["name"] == "PHPSESSID" for c in uniq):
+    # 如果 PHPSESSID 没有 path=/，用任意一个
+    if not seen_php:
         for c in result:
             if c["name"] == "PHPSESSID":
                 uniq.insert(0, c)
+                seen_php = True
                 break
     return uniq
 
@@ -507,88 +502,94 @@ def _cookie_attr(c, attr, default=""):
     return getattr(c, attr, default)
 
 
-def _print_page_debug(page):
-    """打印 page 对象属性，帮助找到 driver"""
-    try:
-        print(f"  [DEBUG] page 类型: {type(page).__name__}", flush=True)
-        attrs = [a for a in dir(page) if not a.startswith('_')]
-        print(f"  [DEBUG] page 属性 ({len(attrs)}): {attrs}", flush=True)
-        for name in ['driver', '_driver', 'browser', '_browser',
-                     'tab', '_tab', 'session', '_session',
-                     'set', 'cookies', 'ele', 'run_js']:
-            if hasattr(page, name):
-                try:
-                    obj = getattr(page, name)
-                    print(f"  [DEBUG] page.{name} 类型: {type(obj).__name__}", flush=True)
-                except Exception as e:
-                    print(f"  [DEBUG] page.{name} 访问失败: {e}", flush=True)
-    except Exception as e:
-        print(f"  [DEBUG] 列举 page 属性失败: {e}", flush=True)
-
-
+# ===================== ★ 核心修复：JS 覆盖 PHPSESSID =====================
 def set_session_cookie(page, cookies_data):
     """
-    回退到测试 3 的成功流程：
-      1. page.get("https://hax.co.id/login")
-      2. page.set_cookies(cookies_list)
-      3. readback（仅日志）
-    不做 JS 注入、不做 driver.add_cookie
+    用 JS document.cookie 直接覆盖 PHPSESSID。
+    关键：不加 domain（浏览器用当前域 hax.co.id），只设 path。
+    注入后立即反查 document.cookie 验证。
     """
     cookies_list = normalize_cookies(cookies_data)
     if not cookies_list:
         print("  [COOKIE] ⚠️ cookie 数据为空或格式不支持", flush=True)
         return False
 
-    names = [f"{c['name']}@{c.get('domain')}{c.get('path', '/')}" for c in cookies_list]
-    print(f"  [COOKIE] 准备注入 {len(cookies_list)} 个: {names}", flush=True)
+    # 提取 PHPSESSID
+    sess_value = None
+    for c in cookies_list:
+        if c["name"] == "PHPSESSID":
+            sess_value = c["value"]
+            break
 
-    # ---- 1. 访问 /login（完全照抄测试 3）----
+    if not sess_value:
+        print("  [COOKIE] ⚠️ 没有 PHPSESSID，无法注入", flush=True)
+        return False
+
+    print(f"  [COOKIE] 目标 PHPSESSID: {sess_value[:8]}...{sess_value[-4:]}", flush=True)
+
+    # ---- 1. 访问 /login ----
     try:
         page.get("https://hax.co.id/login")
         page.wait.doc_loaded(timeout=20)
-        time.sleep(3)
+        time.sleep(2)
         print(f"  [COOKIE] 当前页面: {page.url}", flush=True)
     except Exception as e:
         debug_print(f"预访问 /login 失败: {e}")
 
-    # ---- 2. 只调 set_cookies ----
+    # ---- 2. 打印注入前 document.cookie ----
     try:
-        page.set_cookies(cookies_list)
-        print(f"  [COOKIE] page.set_cookies 调用成功", flush=True)
-    except Exception as e:
-        print(f"  [COOKIE] page.set_cookies 异常: {e}", flush=True)
-        return False
-
-    time.sleep(1)
-
-    # ---- 3. readback（仅日志，不做判定）----
-    try:
-        rb = page.get_cookies()
-        hax_c = []
-        for c in rb:
-            d = str(_cookie_attr(c, "domain", ""))
-            if "hax.co.id" in d:
-                n = _cookie_attr(c, "name", "")
-                p = _cookie_attr(c, "path", "/")
-                v = _cookie_attr(c, "value", "")
-                hax_c.append(f"{n}@{d}{p}={str(v)[:8]}...")
-        print(f"  [COOKIE] readback hax.co.id 下 {len(hax_c)} 个:", flush=True)
-        for n in hax_c:
-            print(f"      {n}", flush=True)
-    except Exception as e:
-        debug_print(f"readback 失败: {e}")
-
-    # ---- 4. 打印 document.cookie 完整内容 ----
-    try:
-        doc = page.run_js("document.cookie") or ""
-        print(f"  [COOKIE] document.cookie ({len(doc)} 字符): {doc[:400]}", flush=True)
+        before = page.run_js("document.cookie") or ""
+        m = re.search(r'PHPSESSID=([^;]+)', before)
+        if m:
+            print(f"  [COOKIE] 注入前已有 PHPSESSID: {m.group(1)[:8]}...{m.group(1)[-4:]}", flush=True)
+        else:
+            print(f"  [COOKIE] 注入前没有 PHPSESSID", flush=True)
     except Exception:
         pass
 
-    # ---- 5. 首次调用时打印 page 属性帮助排查 ----
-    if not getattr(set_session_cookie, '_debug_printed', False):
-        _print_page_debug(page)
-        set_session_cookie._debug_printed = True
+    # ---- 3. 用 JS 覆盖 PHPSESSID（不加 domain）----
+    js_ok = False
+    for js_path in ["/", "/vps-info", "/login"]:
+        try:
+            js = f"document.cookie = 'PHPSESSID={sess_value}; path={js_path}';"
+            page.run_js(js)
+            time.sleep(0.3)
+            after = page.run_js("document.cookie") or ""
+            if sess_value in after:
+                print(f"  [COOKIE] ✅ JS 注入生效 (path={js_path})", flush=True)
+                js_ok = True
+            else:
+                debug_print(f"path={js_path} 未生效")
+        except Exception as e:
+            print(f"  [COOKIE] JS 注入 path={js_path} 异常: {e}", flush=True)
+
+    if not js_ok:
+        print(f"  [COOKIE] ❌ 所有 path 都注入失败", flush=True)
+        return False
+
+    # ---- 4. 验证 document.cookie ----
+    try:
+        after = page.run_js("document.cookie") or ""
+        m = re.search(r'PHPSESSID=([^;]+)', after)
+        if m:
+            got = m.group(1)
+            if got == sess_value:
+                print(f"  [COOKIE] ✅ document.cookie 中 PHPSESSID 与目标一致", flush=True)
+            else:
+                print(f"  [COOKIE] ⚠️ document.cookie 中 PHPSESSID 与目标不一致: {got[:8]}...", flush=True)
+                return False
+        else:
+            print(f"  [COOKIE] ❌ document.cookie 中没有 PHPSESSID", flush=True)
+            return False
+    except Exception as e:
+        print(f"  [COOKIE] 读取 document.cookie 失败: {e}", flush=True)
+        return False
+
+    # ---- 5. 顺便调一次 page.set_cookies（虽然大概率无效）----
+    try:
+        page.set_cookies(cookies_list)
+    except Exception:
+        pass
 
     return True
 
@@ -1199,7 +1200,7 @@ def renew_account(account):
         page = launch(**launch_args)
 
         debug_print("浏览器启动成功")
-        # 先访问 /login（和测试 3 一致）
+        # 先访问 /login
         page.get("https://hax.co.id/login")
         page.wait.doc_loaded(timeout=20)
         page.wait(3)
@@ -1212,7 +1213,7 @@ def renew_account(account):
             cookie_ok = set_session_cookie(page, session_token)
             if cookie_ok:
                 debug_print("Cookie 注入完成，跳转 vps-info")
-                time.sleep(2)
+                time.sleep(1)
                 page.get("https://hax.co.id/vps-info")
                 page.wait.doc_loaded(timeout=15)
                 page.wait(2)
@@ -1522,7 +1523,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (回退测试 3 成功流程)", flush=True)
+    print("   HAX 自动续期 (JS 覆盖 PHPSESSID)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
