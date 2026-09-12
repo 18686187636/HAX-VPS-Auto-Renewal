@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (纯 Cookie + 诊断 + 网络重试)
-- 每个账号独立启动全新浏览器（无需手动清 cookie）
-- requests 探测 + 打印响应头和响应体（诊断）
-- 网络失败自动重试
-- 取消 OAuth 手机号登录
-- Cookie 失败直接跳过，不浪费时间
+HAX VPS Auto-Renewal (CF 挑战感知版)
+- 区分 CF 挑战页和真 session 过期
+- CF 挑战时等待更久 + 更多重试次数
+- 纯 Cookie，不用 OAuth
 """
 import os
 import sys
@@ -46,7 +44,9 @@ MAX_RENEW_ROUNDS = int(os.getenv("MAX_RENEW_ROUNDS", "5"))
 
 NAV_RETRY = int(os.getenv("NAV_RETRY", "3"))
 NAV_RETRY_DELAY = int(os.getenv("NAV_RETRY_DELAY", "10"))
-REQ_RETRY = int(os.getenv("REQ_RETRY", "3"))
+REQ_RETRY = int(os.getenv("REQ_RETRY", "5"))              # ★ 从 3 提高到 5
+REQ_RETRY_DELAY = int(os.getenv("REQ_RETRY_DELAY", "20")) # ★ CF 挑战等更久
+CF_CHALLENGE_DELAY = int(os.getenv("CF_CHALLENGE_DELAY", "45"))  # ★ CF 挑战专用延迟
 
 IGNORE_COOKIE_NAMES = {
     "_ga", "_gid", "_gat_gtag_UA_179253361_1", "_ga_MK6PLQ755F",
@@ -521,8 +521,12 @@ def _cookie_attr(c, attr, default=""):
     return getattr(c, attr, default)
 
 
-# ===================== requests 探测（带诊断 + 重试）=====================
+# ===================== ★ requests 探测（CF 挑战感知 + 重试）=====================
 def probe_cookie_with_requests(sess_value, retry=REQ_RETRY):
+    """
+    返回 (status, info):
+      status: "ok" / "cf" / "expired" / "error"
+    """
     proxies = get_proxies()
     headers = {
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:155.0) Gecko/20100101 Firefox/155.0",
@@ -545,45 +549,64 @@ def probe_cookie_with_requests(sess_value, retry=REQ_RETRY):
             text = r.text
             text_lower = text.lower()
 
-            # ★ 打印完整诊断信息
-            print(f"    [探测] HTTP {r.status_code}, final={r.url}, len={len(text)}", flush=True)
-            print(f"    [探测] 响应头: {dict(r.headers)}", flush=True)
-            print(f"    [探测] 响应体前 500 字符:\n{text[:500]}", flush=True)
+            print(f"    [探测] 第{attempt+1}/{retry}次: HTTP {r.status_code}, "
+                  f"final={r.url}, len={len(text)}", flush=True)
 
-            has_redirect_to_login = ('http-equiv="refresh"' in text_lower
-                                     and '/login' in text_lower)
-            has_logout = ("Logout" in text) or ("Log out" in text)
+            # ---- 识别 CF 挑战页（特征：__CF$cv$params / challenge-platform）----
+            is_cf_challenge = (
+                "__cf$cv$params" in text_lower
+                or "challenge-platform/scripts/jsd" in text_lower
+                or ("cloudflare" in text_lower and "challenge" in text_lower
+                    and len(text) < 3000)
+            )
+
             has_valid_until = "Valid until" in text
             has_vps_title = "VPS Information" in text
+            has_logout = "Logout" in text or "Log out" in text
 
-            if has_redirect_to_login:
-                return False, f"session 过期（重定向到 /login）"
-            if has_logout or has_valid_until or has_vps_title:
-                return True, f"服务端有效 (HTTP {r.status_code}, len={len(text)})"
+            # ---- 优先判定成功 ----
+            if has_valid_until or has_vps_title or has_logout:
+                return "ok", f"服务端有效 (HTTP {r.status_code}, len={len(text)})"
 
+            # ---- 判定 CF 挑战 ----
+            if is_cf_challenge:
+                # CF 挑战：等更久再重试
+                if attempt < retry - 1:
+                    print(f"    [探测] 检测到 CF 挑战，等待 {CF_CHALLENGE_DELAY}s 后重试", flush=True)
+                    time.sleep(CF_CHALLENGE_DELAY)
+                    continue
+                else:
+                    return "cf", f"Cloudflare 挑战（重试 {retry} 次仍未通过）"
+
+            # ---- 判定 session 过期（无 CF 特征 + 短页面 + 重定向登录）----
+            has_redirect_to_login = ('http-equiv="refresh"' in text_lower
+                                     and '/login' in text_lower)
+            if has_redirect_to_login and not is_cf_challenge:
+                return "expired", "session 过期（重定向到 /login）"
+
+            # ---- 短页面，无任何特征 ----
             if len(text) < 2000:
-                return False, f"状态不明 (HTTP {r.status_code}, len={len(text)})"
+                # 也当成 CF 挑战处理（可能是未知页面）
+                if attempt < retry - 1:
+                    print(f"    [探测] 短页面（{len(text)}B），等待 {CF_CHALLENGE_DELAY}s 后重试", flush=True)
+                    time.sleep(CF_CHALLENGE_DELAY)
+                    continue
+                return "error", f"状态不明 (HTTP {r.status_code}, len={len(text)})"
 
-            return True, f"服务端有效 (HTTP {r.status_code}, len={len(text)})"
+            return "ok", f"服务端有效 (HTTP {r.status_code}, len={len(text)})"
 
         except Exception as e:
             last_err = str(e)
             if attempt < retry - 1:
-                print(f"    [探测] 第{attempt+1}/{retry}次请求失败: {last_err[:80]}，5s 后重试", flush=True)
-                time.sleep(5)
+                print(f"    [探测] 第{attempt+1}/{retry}次请求失败: {last_err[:80]}，"
+                      f"{REQ_RETRY_DELAY}s 后重试", flush=True)
+                time.sleep(REQ_RETRY_DELAY)
 
-    return False, f"requests 异常: {last_err[:100]}"
+    return "error", f"requests 异常: {last_err[:100]}"
 
 
-# ===================== ★ Cookie 注入（完全照抄成功账号的流程）=====================
+# ===================== Cookie 注入 =====================
 def set_session_cookie(page, cookies_data):
-    """
-    完全照抄成功账号 2 的流程：
-      1. page.get("/login")
-      2. page.set_cookies(cookies_list)
-      3. JS 兜底
-    不做 delete_cookies（因为每次都是全新浏览器，cookie jar 本身就干净）
-    """
     cookies_list = normalize_cookies(cookies_data)
     if not cookies_list:
         print("  [COOKIE] ⚠️ cookie 数据为空或格式不支持", flush=True)
@@ -601,13 +624,18 @@ def set_session_cookie(page, cookies_data):
 
     print(f"  [COOKIE] 目标 PHPSESSID: {sess_value[:8]}...{sess_value[-4:]}", flush=True)
 
-    # ---- 0. requests 探测（带诊断）----
-    ok, info = probe_cookie_with_requests(sess_value)
-    if ok:
+    # ---- 0. requests 探测 ----
+    status, info = probe_cookie_with_requests(sess_value)
+    if status == "ok":
         print(f"  [COOKIE] ✅ requests 探测：{info}", flush=True)
+    elif status == "cf":
+        print(f"  [COOKIE] ⚠️ CF 挑战持续：{info}（仍尝试浏览器注入）", flush=True)
+    elif status == "expired":
+        print(f"  [COOKIE] ❌ requests 探测：{info}", flush=True)
+        print(f"  [COOKIE] → 该 PHPSESSID 确实已过期，跳过该账号", flush=True)
+        return False
     else:
         print(f"  [COOKIE] ❌ requests 探测：{info}", flush=True)
-        print(f"  [COOKIE] → 该 PHPSESSID 在服务端无效，跳过该账号", flush=True)
         return False
 
     # ---- 1. 访问 /login ----
@@ -617,7 +645,7 @@ def set_session_cookie(page, cookies_data):
     time.sleep(2)
     print(f"  [COOKIE] 当前页面: {page.url}", flush=True)
 
-    # ---- 2. 只调 page.set_cookies ----
+    # ---- 2. set_cookies ----
     try:
         page.set_cookies(cookies_list)
         print(f"  [COOKIE] ✅ page.set_cookies 调用成功", flush=True)
@@ -1182,8 +1210,8 @@ def renew_account(account):
         cookie_ok = set_session_cookie(page, session_token)
         if not cookie_ok:
             print("  ❌ Cookie 注入失败，跳过该账号", flush=True)
-            notify_failed(phone, "Cookie 注入", "requests 探测失败，cookie 无效", bot_token, chat_id)
-            return "failed", {"step": "Cookie 注入", "error": "cookie 无效"}
+            notify_failed(phone, "Cookie 注入", "cookie 无效或 CF 挑战", bot_token, chat_id)
+            return "failed", {"step": "Cookie 注入", "error": "cookie 无效或 CF 挑战"}
 
         # ---------- 验证登录态 ----------
         debug_print("Cookie 注入完成，验证登录态")
@@ -1194,7 +1222,6 @@ def renew_account(account):
             return "failed", {"step": "访问 vps-info", "error": "网络故障"}
         page.wait(2)
 
-        # 二次刷新，让 cookie 完全生效
         if not safe_get(page, "https://hax.co.id/vps-info", timeout=20):
             print("  ❌ 再次访问 vps-info 失败", flush=True)
             notify_failed(phone, "访问 vps-info", "网络故障", bot_token, chat_id)
@@ -1487,7 +1514,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (纯 Cookie + 诊断 + 网络重试)", flush=True)
+    print("   HAX 自动续期 (CF 挑战感知版)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
@@ -1496,6 +1523,7 @@ if __name__ == "__main__":
     print(f"✅ 跳过阈值: {SKIP_THRESHOLD_HOURS} 小时", flush=True)
     print(f"✅ 最大轮数: {MAX_RENEW_ROUNDS}", flush=True)
     print(f"✅ 进度通知: {'开启' if NOTIFY_PROGRESS else '关闭'}", flush=True)
+    print(f"✅ 探测重试: {REQ_RETRY} 次 / CF 挑战延迟: {CF_CHALLENGE_DELAY}s", flush=True)
 
     total = len(ACCOUNTS)
 
@@ -1582,8 +1610,8 @@ if __name__ == "__main__":
                     print(f"  [NOTIFY] 进度通知失败: {e}", flush=True)
 
             if i_in_round < len(accounts_this_round):
-                delay = random.randint(30, 60)
-                print(f"  等待 {delay} 秒后处理下一个账号...", flush=True)
+                delay = random.randint(60, 120)
+                print(f"  等待 {delay} 秒后处理下一个账号（避免 CF 挑战）...", flush=True)
                 time.sleep(delay)
 
         pending = failed_in_round
@@ -1600,8 +1628,8 @@ if __name__ == "__main__":
                     print(f"  [NOTIFY] 轮次结束通知失败: {e}", flush=True)
 
             if will_retry:
-                delay = random.randint(60, 120)
-                print(f"  轮次间隔等待 {delay} 秒...", flush=True)
+                delay = random.randint(90, 180)
+                print(f"  轮次间隔等待 {delay} 秒（给 CF 冷却）...", flush=True)
                 time.sleep(delay)
         else:
             break
