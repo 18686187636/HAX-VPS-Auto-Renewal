@@ -29,6 +29,14 @@ except ImportError:
 # ===================== 环境变量 =====================
 ACCOUNTS_JSON = os.getenv("ACCOUNTS_JSON", "[]")
 ACCOUNTS = json.loads(ACCOUNTS_JSON)
+
+# ★ 修复 1：清洗每个账号字段，去掉 Secrets 粘贴时带的 \n / \r / 首尾空白
+for _acc in ACCOUNTS:
+    for _k in ("phone", "session_token", "bot_token", "chat_id", "code_file"):
+        _v = _acc.get(_k)
+        if isinstance(_v, str):
+            _acc[_k] = _v.strip()
+
 HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
 PROXY_ADDR = os.getenv("PROXY_SERVER", "socks5://127.0.0.1:1080")
 CODE_FILE = "renewal_code.txt"
@@ -49,6 +57,21 @@ IGNORE_COOKIE_NAMES = {
 def debug_print(*args, **kwargs):
     if DEBUG:
         print("[DEBUG]", *args, **kwargs, flush=True)
+
+
+# ★ 修复 2：新增 JS 字符串转义工具
+def _js_escape(s):
+    """
+    把任意值安全地插进 JS 单引号字符串字面量。
+    反斜杠必须第一个替换，否则会重复转义。
+    """
+    if s is None:
+        return ""
+    return (str(s)
+            .replace("\\", "\\\\")
+            .replace("'", "\\'")
+            .replace("\r", "")
+            .replace("\n", "\\n"))
 
 
 # ===================== 代理检测 =====================
@@ -284,7 +307,7 @@ def get_page_field_value(page, label_text):
             }
             return '';
         })('%s');
-        """ % label_text.replace("'", "\\'")
+        """ % _js_escape(label_text)   # ★ 修复 3：用 _js_escape 替代简单替换
         return page.run_js(js) or ""
     except Exception as e:
         debug_print(f"get_page_field_value({label_text}) 异常: {e}")
@@ -436,11 +459,15 @@ def is_logged_in(page):
 
 # ===================== Cookie 规范化 =====================
 def normalize_cookies(cookies_data):
+    # ★ 修复 4：字符串值 strip
     if isinstance(cookies_data, str):
+        value = cookies_data.strip()
+        if not value:
+            return []
         return [
-            {"name": "PHPSESSID", "value": cookies_data,
+            {"name": "PHPSESSID", "value": value,
              "domain": ".hax.co.id", "path": "/"},
-            {"name": "PHPSESSID", "value": cookies_data,
+            {"name": "PHPSESSID", "value": value,
              "domain": ".hax.co.id", "path": "/vps-info"},
         ]
 
@@ -455,17 +482,27 @@ def normalize_cookies(cookies_data):
         value = c.get("value")
         if not name or value is None:
             continue
-        domain = str(c.get("domain", ".hax.co.id"))
+
+        # ★ 修复 4：strip 掉换行/空白
+        name = str(name).strip()
+        value = str(value).strip()
+        if not name or not value:
+            continue
+        # 浏览器导出的已删除标记直接跳过
+        if value.lower() == "deleted":
+            continue
+
+        domain = str(c.get("domain", ".hax.co.id")).strip()
         if "hax.co.id" not in domain:
             continue
         if name in IGNORE_COOKIE_NAMES:
             continue
 
         nc = {
-            "name": str(name),
-            "value": str(value),
+            "name": name,
+            "value": value,
             "domain": domain,
-            "path": str(c.get("path", "/")),
+            "path": str(c.get("path", "/")).strip() or "/",
         }
         exp = c.get("expirationDate") or c.get("expires")
         if exp:
@@ -496,7 +533,7 @@ def _cookie_attr(c, attr, default=""):
 def probe_cookie_with_requests(sess_value):
     """
     用 requests + PHPSESSID 测服务器端。
-    ★ 打印完整响应内容（前 1000 字符）帮助定位。
+    ★ 打印完整响应内容（前 500 字符）帮助定位。
     """
     proxies = get_proxies()
     headers = {
@@ -543,11 +580,10 @@ def probe_cookie_with_requests(sess_value):
 # ===================== Cookie 注入（只调 set_cookies + JS）=====================
 def set_session_cookie(page, cookies_data):
     """
-    ★ 回到测试 3 的成功流程：
+    流程：
       1. page.get("/login")
       2. page.set_cookies(cookies_list)
-      3. JS document.cookie 兜底
-      不做 XHR 探测（避免超时）
+      3. JS document.cookie 兜底（★ 转义后写入）
     """
     cookies_list = normalize_cookies(cookies_data)
     if not cookies_list:
@@ -564,7 +600,12 @@ def set_session_cookie(page, cookies_data):
         print("  [COOKIE] ⚠️ 没有 PHPSESSID，无法注入", flush=True)
         return False
 
-    print(f"  [COOKIE] 目标 PHPSESSID: {sess_value[:8]}...{sess_value[-4:]}", flush=True)
+    # 兜底 strip 一次
+    sess_value = str(sess_value).strip()
+
+    # 打印长度，便于排查是否还有隐藏字符
+    print(f"  [COOKIE] 目标 PHPSESSID: "
+          f"{sess_value[:8]}...{sess_value[-4:]} (len={len(sess_value)})", flush=True)
 
     # ---- 0. requests 探测 ----
     ok, info = probe_cookie_with_requests(sess_value)
@@ -585,19 +626,22 @@ def set_session_cookie(page, cookies_data):
     # ---- 2. 只调 page.set_cookies ----
     try:
         page.set_cookies(cookies_list)
-        print(f"  [COOKIE] ✅ page.set_cookies 调用成功", flush=True)
+        print(f"  [COOKIE] ✅ page.set_cookies 调用成功（{len(cookies_list)} 条）", flush=True)
     except Exception as e:
         print(f"  [COOKIE] ❌ page.set_cookies 失败: {e}", flush=True)
         return False
 
-    # ---- 3. JS 兜底 ----
+    # ---- 3. JS 兜底（★ 修复 5：转义，避免换行破坏 JS 语法）----
     try:
-        page.run_js(f"document.cookie = 'PHPSESSID={sess_value}; path=/; SameSite=Lax';")
-        print(f"  [COOKIE] ✅ JS 注入完成", flush=True)
+        safe = _js_escape(sess_value)
+        page.run_js(
+            f"document.cookie = 'PHPSESSID={safe}; path=/; SameSite=Lax';"
+        )
+        print("  [COOKIE] ✅ JS 注入完成", flush=True)
     except Exception as e:
         print(f"  [COOKIE] ⚠️ JS 注入失败: {e}", flush=True)
 
-    # ---- 4. 不做 XHR，直接返回（让 renew_account 里判断登录态）----
+    # ---- 4. 不做 XHR，直接返回 ----
     return True
 
 
