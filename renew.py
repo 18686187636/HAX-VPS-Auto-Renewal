@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (Cookie + OAuth 双路 + 诊断)
-- curl_cffi 探测 cookie（能明确区分 CF 挑战 vs session 过期）
-- 打印 Set-Cookie 响应头，判断服务端是否认这个 session
-- Cookie 失败 → 自动 OAuth 兜底（含确认授权按钮点击）
+HAX VPS Auto-Renewal (诊断版 - 打印 988 字节响应内容)
 """
 import os
 import sys
@@ -20,14 +17,6 @@ import traceback
 from datetime import datetime, timezone, timedelta
 
 import requests as req_lib
-
-try:
-    from curl_cffi import requests as curl_requests
-    HAS_CURL_CFFI = True
-except ImportError:
-    curl_requests = None
-    HAS_CURL_CFFI = False
-
 from ruyipage import launch, Keys
 
 try:
@@ -50,14 +39,6 @@ NOTIFY_PROGRESS = os.getenv("NOTIFY_PROGRESS", "true").lower() == "true"
 SKIP_THRESHOLD_HOURS = float(os.getenv("SKIP_THRESHOLD_HOURS", "96"))
 MAX_RENEW_ROUNDS = int(os.getenv("MAX_RENEW_ROUNDS", "5"))
 
-NAV_RETRY = int(os.getenv("NAV_RETRY", "3"))
-NAV_RETRY_DELAY = int(os.getenv("NAV_RETRY_DELAY", "10"))
-REQ_RETRY = int(os.getenv("REQ_RETRY", "3"))
-REQ_RETRY_DELAY = int(os.getenv("REQ_RETRY_DELAY", "15"))
-CF_CHALLENGE_DELAY = int(os.getenv("CF_CHALLENGE_DELAY", "45"))
-
-IMPERSONATE = os.getenv("IMPERSONATE", "chrome120")
-
 IGNORE_COOKIE_NAMES = {
     "_ga", "_gid", "_gat_gtag_UA_179253361_1", "_ga_MK6PLQ755F",
     "__gads", "__gpi", "__eoi",
@@ -68,26 +49,6 @@ IGNORE_COOKIE_NAMES = {
 def debug_print(*args, **kwargs):
     if DEBUG:
         print("[DEBUG]", *args, **kwargs, flush=True)
-
-
-def http_get(url, cookies=None, proxies_dict=None, headers=None,
-             timeout=30, allow_redirects=True):
-    if HAS_CURL_CFFI:
-        try:
-            r = curl_requests.get(
-                url, cookies=cookies, proxies=proxies_dict, headers=headers,
-                impersonate=IMPERSONATE, allow_redirects=allow_redirects,
-                timeout=timeout,
-            )
-            return r.status_code, r.text, str(r.url), dict(r.headers), f"curl_cffi/{IMPERSONATE}"
-        except Exception as e:
-            debug_print(f"curl_cffi 失败，回退 requests: {e}")
-
-    r = req_lib.get(
-        url, cookies=cookies, proxies=proxies_dict, headers=headers,
-        allow_redirects=allow_redirects, timeout=timeout,
-    )
-    return r.status_code, r.text, r.url, dict(r.headers), "requests"
 
 
 # ===================== 代理检测 =====================
@@ -119,7 +80,7 @@ def get_proxies():
     return None
 
 
-def check_proxy_ip(proxies, retry=3):
+def check_proxy_ip(proxies):
     if not proxies:
         return False, None
     services = [
@@ -127,37 +88,17 @@ def check_proxy_ip(proxies, retry=3):
         'https://ip.sb/json',
         'https://httpbin.org/ip'
     ]
-    for attempt in range(retry):
-        for url in services:
-            try:
-                status, text, _, _, _ = http_get(url, proxies_dict=proxies, timeout=15)
-                if status == 200:
-                    data = json.loads(text)
-                    ip = data.get('ip') or data.get('origin')
-                    if ip:
-                        return True, ip
-            except Exception:
-                continue
-        if attempt < retry - 1:
-            time.sleep(5)
-    return False, None
-
-
-# ===================== 浏览器安全导航 =====================
-def safe_get(page, url, retry=NAV_RETRY, delay=NAV_RETRY_DELAY, timeout=20):
-    for attempt in range(retry):
+    for url in services:
         try:
-            page.get(url)
-            page.wait.doc_loaded(timeout=timeout)
-            return True
-        except Exception as e:
-            err = str(e)
-            is_timeout = ("timeout" in err.lower() or "超时" in err)
-            print(f"  [NAV] page.get({url}) 第{attempt+1}/{retry}次失败: "
-                  f"{'超时' if is_timeout else err[:100]}", flush=True)
-            if attempt < retry - 1:
-                time.sleep(delay)
-    return False
+            resp = req_lib.get(url, proxies=proxies, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                ip = data.get('ip') or data.get('origin')
+                if ip:
+                    return True, ip
+        except Exception:
+            continue
+    return False, None
 
 
 # ===================== 工具函数 =====================
@@ -168,21 +109,16 @@ def get_beijing_time():
 def send_telegram_message(text, bot_token, chat_id):
     if not bot_token or not chat_id:
         return False
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
-
     proxies = get_proxies()
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     try:
-        if HAS_CURL_CFFI:
-            r = curl_requests.post(url, json=payload, proxies=proxies,
-                                   timeout=10, impersonate=IMPERSONATE)
-            return r.json().get("ok", False)
-        else:
-            resp = req_lib.post(url, json=payload, timeout=10, proxies=proxies)
-            return resp.json().get("ok", False)
+        resp = req_lib.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+                            timeout=10, proxies=proxies)
+        return resp.json().get("ok", False)
     except Exception:
         try:
-            resp = req_lib.post(url, json=payload, timeout=10)
+            resp = req_lib.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+                                timeout=10)
             return resp.json().get("ok", False)
         except Exception:
             return False
@@ -193,12 +129,13 @@ def send_telegram_photo(photo_path, caption, bot_token, chat_id):
         return False
     if not os.path.exists(photo_path):
         return False
+    proxies = get_proxies()
     url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
     try:
         with open(photo_path, 'rb') as f:
             files = {'photo': f}
             data = {'chat_id': chat_id, 'caption': caption}
-            resp = req_lib.post(url, data=data, files=files, timeout=30)
+            resp = req_lib.post(url, data=data, files=files, timeout=30, proxies=proxies)
             return resp.json().get("ok", False)
     except Exception as e:
         print(f"  [TG] 发送图片失败: {e}", flush=True)
@@ -207,6 +144,7 @@ def send_telegram_photo(photo_path, caption, bot_token, chat_id):
 
 def take_screenshot(page, path, bot_token, chat_id, caption):
     try:
+        debug_print(f"尝试截图: {path}")
         driver = None
         for attr in ['driver', '_driver', 'page']:
             if hasattr(page, attr):
@@ -554,95 +492,67 @@ def _cookie_attr(c, attr, default=""):
     return getattr(c, attr, default)
 
 
-# ===================== ★ requests 探测（curl_cffi + Set-Cookie 诊断）=====================
-def probe_cookie_with_requests(sess_value, retry=REQ_RETRY):
+# ===================== ★ requests 探测（打印完整响应）=====================
+def probe_cookie_with_requests(sess_value):
     """
-    返回 (status, info):
-      status: "ok" / "cf" / "expired" / "error"
+    用 requests + PHPSESSID 测服务器端。
+    ★ 打印完整响应内容（前 1000 字符）帮助定位。
     """
     proxies = get_proxies()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:155.0) Gecko/20100101 Firefox/155.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Referer": "https://hax.co.id/login",
+    }
+    try:
+        r = req_lib.get(
+            "https://hax.co.id/vps-info",
+            cookies={"PHPSESSID": sess_value},
+            headers=headers,
+            proxies=proxies,
+            allow_redirects=True,
+            timeout=30,
+        )
+    except Exception as e:
+        return False, f"requests 异常: {e}"
 
-    last_err = None
-    for attempt in range(retry):
-        try:
-            status_code, text, final_url, resp_headers, engine = http_get(
-                "https://hax.co.id/vps-info",
-                cookies={"PHPSESSID": sess_value},
-                proxies_dict=proxies,
-                headers={"Referer": "https://hax.co.id/login"},
-                timeout=30,
-                allow_redirects=True,
-            )
+    text = r.text
+    text_lower = text.lower()
 
-            text_lower = text.lower()
+    # ★ 打印完整响应
+    print(f"    [探测] HTTP {r.status_code}, final={r.url}, len={len(text)}", flush=True)
+    print(f"    [探测] 响应头: {dict(r.headers)}", flush=True)
+    print(f"    [探测] 响应体前 500 字符:\n{text[:500]}", flush=True)
 
-            # ★ 打印 Set-Cookie 判断服务端是否接受这个 session
-            set_cookie = resp_headers.get("set-cookie", "")
-            if set_cookie:
-                # 只显示 PHPSESSID 部分
-                if "PHPSESSID" in set_cookie:
-                    import re as _re
-                    m = _re.search(r'PHPSESSID=([^;,\s]+)', set_cookie)
-                    if m:
-                        server_sid = m.group(1)
-                        if server_sid == sess_value:
-                            print(f"    [探测] 服务端 Set-Cookie 与发送的 PHPSESSID 一致 ✅", flush=True)
-                        else:
-                            print(f"    [探测] ⚠️ 服务端返回了不同的 PHPSESSID: "
-                                  f"{server_sid[:8]}...{server_sid[-4:]}（说明服务端不认我们的 cookie）", flush=True)
+    is_cf_title = "<title>just a moment" in text_lower
+    is_cf_short = len(text) < 5000 and "challenge-platform" in text_lower
+    is_cf = is_cf_title or is_cf_short
 
-            print(f"    [探测] 第{attempt+1}/{retry}次 ({engine}): HTTP {status_code}, "
-                  f"final={final_url}, len={len(text)}", flush=True)
+    has_logout = ("Logout" in text) or ("Log out" in text) or ("logout" in text)
+    has_valid_until = "Valid until" in text
+    has_vps_info = "VPS Information" in text or "vps-info" in r.url
 
-            is_cf_challenge = (
-                "__cf$cv$params" in text_lower
-                or "challenge-platform/scripts/jsd" in text_lower
-            )
-
-            has_valid = ("Valid until" in text or "VPS Information" in text
-                         or "Logout" in text or "Log out" in text)
-
-            if has_valid:
-                return "ok", f"服务端有效 ({engine}, len={len(text)})"
-
-            has_redirect_to_login = ('http-equiv="refresh"' in text_lower
-                                     and '/login' in text_lower)
-
-            if has_redirect_to_login and not is_cf_challenge:
-                return "expired", f"session 过期（重定向到 /login）"
-
-            if is_cf_challenge:
-                if attempt < retry - 1:
-                    print(f"    [探测] 检测到 CF 挑战，等待 {CF_CHALLENGE_DELAY}s 后重试", flush=True)
-                    time.sleep(CF_CHALLENGE_DELAY)
-                    continue
-                return "cf", f"Cloudflare 挑战持续（重试 {retry} 次）"
-
-            if len(text) < 2000:
-                if attempt < retry - 1:
-                    print(f"    [探测] 短页面（{len(text)}B），等待 {CF_CHALLENGE_DELAY}s 后重试", flush=True)
-                    time.sleep(CF_CHALLENGE_DELAY)
-                    continue
-                return "error", f"状态不明 ({engine}, len={len(text)})"
-
-            return "ok", f"服务端有效 ({engine}, len={len(text)})"
-
-        except Exception as e:
-            last_err = str(e)
-            if attempt < retry - 1:
-                print(f"    [探测] 第{attempt+1}/{retry}次请求失败: {last_err[:80]}，"
-                      f"{REQ_RETRY_DELAY}s 后重试", flush=True)
-                time.sleep(REQ_RETRY_DELAY)
-
-    return "error", f"requests 异常: {last_err[:100]}"
+    if has_logout or has_valid_until or has_vps_info:
+        return True, f"服务端有效 (HTTP {r.status_code})"
+    if is_cf:
+        return False, f"Cloudflare 拦截 (HTTP {r.status_code})"
+    return False, f"状态不明 (HTTP {r.status_code}, len={len(text)})"
 
 
-# ===================== Cookie 注入 =====================
+# ===================== Cookie 注入（只调 set_cookies + JS）=====================
 def set_session_cookie(page, cookies_data):
+    """
+    ★ 回到测试 3 的成功流程：
+      1. page.get("/login")
+      2. page.set_cookies(cookies_list)
+      3. JS document.cookie 兜底
+      不做 XHR 探测（避免超时）
+    """
     cookies_list = normalize_cookies(cookies_data)
     if not cookies_list:
         print("  [COOKIE] ⚠️ cookie 数据为空或格式不支持", flush=True)
-        return False, "invalid"
+        return False
 
     sess_value = None
     for c in cookies_list:
@@ -652,54 +562,50 @@ def set_session_cookie(page, cookies_data):
 
     if not sess_value:
         print("  [COOKIE] ⚠️ 没有 PHPSESSID，无法注入", flush=True)
-        return False, "invalid"
+        return False
 
     print(f"  [COOKIE] 目标 PHPSESSID: {sess_value[:8]}...{sess_value[-4:]}", flush=True)
 
-    status, info = probe_cookie_with_requests(sess_value)
-    if status == "ok":
+    # ---- 0. requests 探测 ----
+    ok, info = probe_cookie_with_requests(sess_value)
+    if ok:
         print(f"  [COOKIE] ✅ requests 探测：{info}", flush=True)
-    elif status == "cf":
-        print(f"  [COOKIE] ⚠️ CF 挑战持续：{info}（仍尝试浏览器注入）", flush=True)
-    elif status == "expired":
-        print(f"  [COOKIE] ❌ requests 探测：{info}", flush=True)
-        print(f"  [COOKIE] → session 已过期，跳过 cookie 注入，走 OAuth", flush=True)
-        return False, "expired"
     else:
-        print(f"  [COOKIE] ⚠️ requests 探测失败：{info}（仍尝试浏览器注入）", flush=True)
+        print(f"  [COOKIE] ⚠️ requests 探测：{info}（继续尝试浏览器注入）", flush=True)
 
-    if not safe_get(page, "https://hax.co.id/login", timeout=20):
-        print(f"  [COOKIE] ❌ 访问 /login 三次都失败", flush=True)
-        return False, "error"
-    time.sleep(2)
-    print(f"  [COOKIE] 当前页面: {page.url}", flush=True)
+    # ---- 1. 访问 /login ----
+    try:
+        page.get("https://hax.co.id/login")
+        page.wait.doc_loaded(timeout=20)
+        time.sleep(2)
+        print(f"  [COOKIE] 当前页面: {page.url}", flush=True)
+    except Exception as e:
+        debug_print(f"预访问 /login 失败: {e}")
 
+    # ---- 2. 只调 page.set_cookies ----
     try:
         page.set_cookies(cookies_list)
         print(f"  [COOKIE] ✅ page.set_cookies 调用成功", flush=True)
     except Exception as e:
         print(f"  [COOKIE] ❌ page.set_cookies 失败: {e}", flush=True)
-        return False, "error"
+        return False
 
+    # ---- 3. JS 兜底 ----
     try:
         page.run_js(f"document.cookie = 'PHPSESSID={sess_value}; path=/; SameSite=Lax';")
         print(f"  [COOKIE] ✅ JS 注入完成", flush=True)
     except Exception as e:
         print(f"  [COOKIE] ⚠️ JS 注入失败: {e}", flush=True)
 
-    return True, "ok"
+    # ---- 4. 不做 XHR，直接返回（让 renew_account 里判断登录态）----
+    return True
 
 
-# ===================== OAuth 登录（增强版）=====================
+# ===================== Telegram OAuth 登录 =====================
 def login_with_telegram_original(page, phone):
     debug_print("进入 login_with_telegram_original")
     print(f"  [LOGIN] 尝试 Telegram OAuth 登录: {phone}", flush=True)
-
     try:
-        if "hax.co.id/login" not in (page.url or ""):
-            safe_get(page, "https://hax.co.id/login", timeout=20)
-            page.wait(2)
-
         iframe_xpath = "xpath://iframe[contains(@src, 'oauth.telegram.org')]"
         for _ in range(10):
             if page.ele(iframe_xpath, timeout=2):
@@ -707,109 +613,57 @@ def login_with_telegram_original(page, phone):
             time.sleep(1)
         else:
             raise RuntimeError("未找到 Telegram OAuth iframe")
-
         with page.with_frame(iframe_xpath) as frame_page:
             btn = frame_page.ele("css:button.tgme_widget_login_button", timeout=5)
             if not btn:
                 raise RuntimeError("未找到 Telegram 登录按钮")
             btn.click_self()
             print("  [LOGIN] 点击 Telegram 登录按钮", flush=True)
-
-        page.wait(3)
-
-        oauth_tab_id = None
-        for _ in range(10):
-            for tab_id in page.tab_ids:
-                tab = page.get_tab(tab_id)
-                if "oauth.telegram.org" in (tab.url or ""):
-                    oauth_tab_id = tab_id
+            page.wait(3)
+            oauth_tab_id = None
+            for _ in range(10):
+                for tab_id in page.tab_ids:
+                    tab = page.get_tab(tab_id)
+                    if "oauth.telegram.org" in (tab.url or ""):
+                        oauth_tab_id = tab_id
+                        break
+                if oauth_tab_id:
                     break
-            if oauth_tab_id:
-                break
-            time.sleep(1)
-        if not oauth_tab_id:
-            raise RuntimeError("未找到 OAuth tab")
-
-        oauth_page = page.get_tab(oauth_tab_id)
-        oauth_page.activate()
-        oauth_page.wait.doc_loaded(timeout=30)
-        page.wait(2)
-
-        phone_input = None
-        for _ in range(10):
-            phone_input = oauth_page.ele("css:#login-phone-code", timeout=2)
-            if phone_input:
-                break
-            time.sleep(1)
-
-        if phone_input:
+                time.sleep(1)
+            if not oauth_tab_id:
+                raise RuntimeError("未找到 OAuth tab")
+            oauth_page = page.get_tab(oauth_tab_id)
+            oauth_page.activate()
+            oauth_page.wait.doc_loaded(timeout=30)
+            phone_input = None
+            for _ in range(10):
+                phone_input = oauth_page.ele("css:#login-phone-code", timeout=2)
+                if phone_input:
+                    break
+                time.sleep(1)
+            if not phone_input:
+                raise RuntimeError("未找到手机号输入框")
             phone_input.input(phone, clear=True)
             print(f"  [LOGIN] 输入手机号: {phone}", flush=True)
             page.wait(2)
-
-            continue_btn = (
-                oauth_page.ele("text:继续") or
-                oauth_page.ele("text:Next") or
-                oauth_page.ele("text:Next >") or
-                oauth_page.ele("css:button[type=submit]") or
-                oauth_page.ele("css:button.btn-primary") or
-                oauth_page.ele("css:button")
-            )
+            continue_btn = (oauth_page.ele("text:继续") or oauth_page.ele("text:Next")
+                            or oauth_page.ele("css:button[type=submit]")
+                            or oauth_page.ele("css:button"))
             if continue_btn:
                 continue_btn.click_self()
                 print("  [LOGIN] 点击继续", flush=True)
             else:
                 oauth_page.run_js("document.querySelector('form')?.submit();")
-                print("  [LOGIN] 使用 JS 提交", flush=True)
-        else:
-            print("  [LOGIN] 无需输入手机号", flush=True)
-
-        page.wait(3)
-
-        confirm_keywords = [
-            "Allow", "Authorize", "Confirm", "Continue", "Yes",
-            "允许", "确认", "授权", "继续", "同意",
-        ]
-
-        for attempt in range(15):
             try:
+                page.to_tab(page.tab_id)
+            except Exception:
+                pass
+            for _ in range(60):
+                time.sleep(2)
                 if "hax.co.id/vps-info" in (page.url or ""):
                     print("  [LOGIN] 已跳转到 VPS 信息页", flush=True)
                     return True
-
-                if oauth_tab_id and oauth_tab_id in page.tab_ids:
-                    oauth_page = page.get_tab(oauth_tab_id)
-                    oauth_page.activate()
-
-                    for kw in confirm_keywords:
-                        try:
-                            btn = oauth_page.ele(f"xpath://*[contains(text(), '{kw}')]", timeout=1)
-                            if btn and btn.is_displayed:
-                                btn_text = (btn.text or "").strip()
-                                if any(x in btn_text.lower() for x in ["cancel", "取消", "no", "拒绝"]):
-                                    continue
-                                print(f"  [LOGIN] ✅ 点击确认按钮: '{btn_text}'", flush=True)
-                                try:
-                                    btn.click_self()
-                                except Exception:
-                                    btn.click_self(by_js=True)
-                                time.sleep(3)
-                                break
-                        except Exception:
-                            continue
-                time.sleep(2)
-            except Exception as e:
-                debug_print(f"确认授权尝试异常: {e}")
-                time.sleep(2)
-
-        for _ in range(60):
-            time.sleep(2)
-            if "hax.co.id/vps-info" in (page.url or ""):
-                print("  [LOGIN] 已跳转到 VPS 信息页", flush=True)
-                return True
-
-        raise RuntimeError("登录超时，未跳转到 VPS 信息页")
-
+            raise RuntimeError("登录超时，未跳转到 VPS 信息页")
     except Exception as e:
         print(f"  [LOGIN] 失败: {e}", flush=True)
         traceback.print_exc()
@@ -937,22 +791,27 @@ def get_audio_url(page):
 
 
 def download_audio(url):
-    try:
-        if HAS_CURL_CFFI:
-            r = curl_requests.get(url, impersonate=IMPERSONATE, timeout=30,
-                                  headers={"Referer": "https://www.google.com/"})
-            content = r.content
-        else:
-            r = req_lib.get(url, timeout=30,
-                            headers={"Referer": "https://www.google.com/"})
-            content = r.content
-        if content and len(content) >= 1000:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:155.0) Gecko/20100101 Firefox/155.0",
+        "Referer": "https://www.google.com/",
+    }
+    urls = [url]
+    if "recaptcha.net" in url:
+        urls.append(url.replace("recaptcha.net", "www.google.com"))
+    elif "google.com" in url:
+        urls.append(url.replace("www.google.com", "recaptcha.net"))
+    for audio_url in urls:
+        try:
+            r = req_lib.get(audio_url, headers=headers, timeout=30)
+            r.raise_for_status()
+            if len(r.content) < 1000:
+                continue
             path = tempfile.mktemp(suffix=".mp3")
             with open(path, "wb") as f:
-                f.write(content)
+                f.write(r.content)
             return path
-    except Exception:
-        pass
+        except Exception:
+            pass
     return None
 
 
@@ -1181,14 +1040,9 @@ def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id,
         try:
             proxies = get_proxies()
             url = f"https://api.telegram.org/bot{bt['token']}/getUpdates"
-            if HAS_CURL_CFFI:
-                r = curl_requests.get(url, timeout=10, proxies=proxies,
-                                      impersonate=IMPERSONATE)
-                data = r.json()
-            else:
-                resp = (req_lib.get(url, timeout=10, proxies=proxies)
-                        if proxies else req_lib.get(url, timeout=10))
-                data = resp.json()
+            resp = (req_lib.get(url, timeout=10, proxies=proxies)
+                    if proxies else req_lib.get(url, timeout=10))
+            data = resp.json()
             if data.get("ok") and data.get("result"):
                 offsets[bt['token']] = max(u["update_id"] for u in data["result"]) + 1
             else:
@@ -1220,14 +1074,9 @@ def get_renewal_code_from_telegram(bot_tokens, page, phone, bot_token, chat_id,
                 proxies = get_proxies()
                 url = (f"https://api.telegram.org/bot{bt['token']}/getUpdates"
                        f"?offset={offset}&timeout=5")
-                if HAS_CURL_CFFI:
-                    r = curl_requests.get(url, timeout=10, proxies=proxies,
-                                          impersonate=IMPERSONATE)
-                    data = r.json()
-                else:
-                    resp = (req_lib.get(url, timeout=10, proxies=proxies)
-                            if proxies else req_lib.get(url, timeout=10))
-                    data = resp.json()
+                resp = (req_lib.get(url, timeout=10, proxies=proxies)
+                        if proxies else req_lib.get(url, timeout=10))
+                data = resp.json()
                 if data.get("ok"):
                     for update in data.get("result", []):
                         offsets[bt['token']] = update["update_id"] + 1
@@ -1358,43 +1207,49 @@ def renew_account(account):
         page = launch(**launch_args)
 
         debug_print("浏览器启动成功")
+        page.get("https://hax.co.id/login")
+        page.wait.doc_loaded(timeout=20)
+        page.wait(3)
 
+        # ---------- Cookie 登录 ----------
         login_success = False
-        cookie_status = "skip"
-
         if session_token:
+            debug_print("尝试 Cookie 登录")
             print("  [LOGIN] 尝试使用 session_token 快速登录...", flush=True)
-            cookie_ok, cookie_status = set_session_cookie(page, session_token)
-
+            cookie_ok = set_session_cookie(page, session_token)
             if cookie_ok:
                 debug_print("Cookie 注入完成，验证登录态")
                 time.sleep(1)
-                if safe_get(page, "https://hax.co.id/vps-info", timeout=20):
-                    page.wait(2)
-                    if safe_get(page, "https://hax.co.id/vps-info", timeout=20):
-                        page.wait(2)
-                        if is_logged_in(page):
-                            print("  ✅ Cookie 登录成功", flush=True)
-                            login_success = True
-                        else:
-                            print("  ⚠️ Cookie 未生效", flush=True)
-                    else:
-                        print("  ⚠️ 二次访问 vps-info 失败", flush=True)
+                page.get("https://hax.co.id/vps-info")
+                page.wait.doc_loaded(timeout=15)
+                page.wait(2)
+                page.get("https://hax.co.id/vps-info")
+                page.wait.doc_loaded(timeout=15)
+                page.wait(2)
+                if is_logged_in(page):
+                    print("  ✅ Cookie 登录成功", flush=True)
+                    login_success = True
                 else:
-                    print("  ⚠️ 访问 vps-info 失败", flush=True)
+                    print("  ⚠️ Cookie 未生效，尝试 OAuth", flush=True)
+                    try:
+                        snippet = page.run_js("document.body.innerText.substring(0, 300)") or ""
+                        print(f"  [DEBUG] 页面片段: {snippet[:200]}", flush=True)
+                    except Exception:
+                        pass
             else:
-                print(f"  ⚠️ Cookie 注入失败 (状态: {cookie_status})", flush=True)
+                print("  ⚠️ Cookie 注入失败，尝试 OAuth", flush=True)
 
         if not login_success:
-            print("  [LOGIN] Cookie 无效，尝试 Telegram OAuth 登录...", flush=True)
+            debug_print("执行 OAuth 兜底")
+            print("  [LOGIN] 执行 Telegram OAuth 登录...", flush=True)
             login_success = login_with_telegram_original(page, phone)
             if not login_success:
-                raise RuntimeError("Telegram OAuth 登录失败")
+                raise RuntimeError("Telegram 登录失败")
 
         if not is_logged_in(page):
             print("  ⚠️ 登录后未检测到登录状态，重新加载...", flush=True)
-            safe_get(page, "https://hax.co.id/vps-info", timeout=15)
-            page.wait(2)
+            page.get("https://hax.co.id/vps-info")
+            page.wait.doc_loaded(timeout=15)
             if not is_logged_in(page):
                 raise RuntimeError("无法确认登录状态")
 
@@ -1409,8 +1264,10 @@ def renew_account(account):
         except Exception as e:
             print(f"  [截图] 登录截图失败: {e}", flush=True)
 
+        # ---------- 检测是否需要续期 ----------
         if "hax.co.id/vps-info" not in (page.url or ""):
-            safe_get(page, "https://hax.co.id/vps-info", timeout=15)
+            page.get("https://hax.co.id/vps-info")
+            page.wait.doc_loaded(timeout=15)
         page.wait(2)
         try:
             should_renew, valid_until, remaining_hours = check_should_renew(page)
@@ -1423,6 +1280,7 @@ def renew_account(account):
             notify_skipped(phone, valid_until, remaining_hours, bot_token, chat_id)
             return "skipped", {"valid_until": valid_until, "remaining_hours": remaining_hours}
 
+        # ---------- 导航到续期 ----------
         debug_print("导航到 VPS 续期")
         vps_menu = None
         for _ in range(5):
@@ -1445,6 +1303,7 @@ def renew_account(account):
         print("  [NAV] 点击 VPS Renew", flush=True)
         page.wait(5)
 
+        # ---------- 填写表单 ----------
         debug_print("填写续期表单")
         web_input = page.ele("css:#web_address")
         if web_input:
@@ -1473,6 +1332,7 @@ def renew_account(account):
         except Exception as e:
             print(f"  [截图] Renew VPS 截图失败: {e}", flush=True)
 
+        # ---------- 获取续期码 ----------
         debug_print("开始获取续期码")
         code = read_code_from_file()
         source = "file"
@@ -1503,6 +1363,7 @@ def renew_account(account):
 
         print(f"  [CODE] 使用原始码（长度 {len(code)}）", flush=True)
 
+        # ---------- 进入续期码输入页 ----------
         debug_print("进入续期码输入页")
         renew_code_link = None
         for selector in [
@@ -1525,6 +1386,7 @@ def renew_account(account):
 
         close_ads(page)
 
+        # ---------- 算术验证码 ----------
         captcha_result = solve_arithmetic_captcha(page)
         if captcha_result is not None:
             code_input = page.ele("css:#captcha")
@@ -1532,6 +1394,7 @@ def renew_account(account):
                 code_input.input(str(captcha_result), clear=True)
                 print(f"  [CAPTCHA] 输入结果: {captcha_result}", flush=True)
 
+        # 填入续期码
         debug_print("填入续期码")
         vcode_input = None
         for selector in ["css:input.form-control:not(#captcha)",
@@ -1553,6 +1416,7 @@ def renew_account(account):
             vcode_input.input(code, clear=True)
             print(f"  [CODE] 输入 renewal code（长度 {len(code)}）", flush=True)
 
+        # ---------- reCAPTCHA ----------
         debug_print("开始 reCAPTCHA")
         print("  [reCAPTCHA] 处理音频验证...", flush=True)
         recaptcha_solved = solve_recaptcha(page, timeout=90)
@@ -1561,6 +1425,7 @@ def renew_account(account):
             page.wait(60)
             recaptcha_solved = is_recaptcha_solved(page)
 
+        # ---------- 提交 ----------
         debug_print("提交续期")
         print("  [SUBMIT] 提交续期...", flush=True)
         close_ads(page)
@@ -1587,6 +1452,7 @@ def renew_account(account):
         print("  [SUBMIT] 已点击提交，等待结果...", flush=True)
         time.sleep(60)
 
+        # ---------- 结果检查 ----------
         debug_print("检查续期结果")
         for _ in range(3):
             close_ads(page)
@@ -1663,11 +1529,8 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (Cookie + OAuth 双路 + 诊断)", flush=True)
+    print("   HAX 自动续期 (诊断版 - 打印请求响应)", flush=True)
     print("#########################", flush=True)
-    print(f"✅ curl_cffi: {'已加载 ✅' if HAS_CURL_CFFI else '未安装（回退 requests）'}", flush=True)
-    print(f"✅ 模拟浏览器: {IMPERSONATE}", flush=True)
-
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
         sys.exit(1)
@@ -1761,9 +1624,7 @@ if __name__ == "__main__":
                     print(f"  [NOTIFY] 进度通知失败: {e}", flush=True)
 
             if i_in_round < len(accounts_this_round):
-                delay = random.randint(30, 60)
-                print(f"  等待 {delay} 秒后处理下一个账号...", flush=True)
-                time.sleep(delay)
+                time.sleep(random.randint(10, 30))
 
         pending = failed_in_round
 
