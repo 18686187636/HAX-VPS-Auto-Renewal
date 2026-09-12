@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (纯 Cookie 模式 + 清除残留)
-- 每个账号登录前先清除浏览器所有 cookie
-- 不使用 OAuth 手机号登录
-- 探测失败直接跳过该账号
+HAX VPS Auto-Renewal (纯 Cookie + 诊断 + 网络重试)
+- 每个账号独立启动全新浏览器（无需手动清 cookie）
+- requests 探测 + 打印响应头和响应体（诊断）
+- 网络失败自动重试
+- 取消 OAuth 手机号登录
+- Cookie 失败直接跳过，不浪费时间
 """
 import os
 import sys
@@ -519,7 +521,7 @@ def _cookie_attr(c, attr, default=""):
     return getattr(c, attr, default)
 
 
-# ===================== requests 探测 =====================
+# ===================== requests 探测（带诊断 + 重试）=====================
 def probe_cookie_with_requests(sess_value, retry=REQ_RETRY):
     proxies = get_proxies()
     headers = {
@@ -542,7 +544,11 @@ def probe_cookie_with_requests(sess_value, retry=REQ_RETRY):
             )
             text = r.text
             text_lower = text.lower()
+
+            # ★ 打印完整诊断信息
             print(f"    [探测] HTTP {r.status_code}, final={r.url}, len={len(text)}", flush=True)
+            print(f"    [探测] 响应头: {dict(r.headers)}", flush=True)
+            print(f"    [探测] 响应体前 500 字符:\n{text[:500]}", flush=True)
 
             has_redirect_to_login = ('http-equiv="refresh"' in text_lower
                                      and '/login' in text_lower)
@@ -569,13 +575,14 @@ def probe_cookie_with_requests(sess_value, retry=REQ_RETRY):
     return False, f"requests 异常: {last_err[:100]}"
 
 
-# ===================== ★ Cookie 注入（清除 + 注入）=====================
+# ===================== ★ Cookie 注入（完全照抄成功账号的流程）=====================
 def set_session_cookie(page, cookies_data):
     """
-    1. 访问 /login 建立域
-    2. ★ 清除浏览器所有 cookie（防止上一账号残留）
-    3. 刷新页面
-    4. 注入目标 cookie
+    完全照抄成功账号 2 的流程：
+      1. page.get("/login")
+      2. page.set_cookies(cookies_list)
+      3. JS 兜底
+    不做 delete_cookies（因为每次都是全新浏览器，cookie jar 本身就干净）
     """
     cookies_list = normalize_cookies(cookies_data)
     if not cookies_list:
@@ -594,7 +601,7 @@ def set_session_cookie(page, cookies_data):
 
     print(f"  [COOKIE] 目标 PHPSESSID: {sess_value[:8]}...{sess_value[-4:]}", flush=True)
 
-    # ---- 0. requests 探测 ----
+    # ---- 0. requests 探测（带诊断）----
     ok, info = probe_cookie_with_requests(sess_value)
     if ok:
         print(f"  [COOKIE] ✅ requests 探测：{info}", flush=True)
@@ -610,29 +617,7 @@ def set_session_cookie(page, cookies_data):
     time.sleep(2)
     print(f"  [COOKIE] 当前页面: {page.url}", flush=True)
 
-    # ---- 2. ★ 清除浏览器所有 cookie ----
-    try:
-        if hasattr(page, 'delete_cookies'):
-            page.delete_cookies()
-            print(f"  [COOKIE] ✅ page.delete_cookies() 清除所有 cookie", flush=True)
-        else:
-            print(f"  [COOKIE] ⚠️ page 没有 delete_cookies 方法", flush=True)
-    except Exception as e:
-        print(f"  [COOKIE] ⚠️ 清除 cookie 失败: {e}", flush=True)
-
-    time.sleep(1)
-
-    # ---- 3. 刷新页面确认已清空 ----
-    try:
-        page.refresh()
-        page.wait.doc_loaded(timeout=15)
-        time.sleep(2)
-        doc = page.run_js("document.cookie") or ""
-        print(f"  [COOKIE] 清除后 document.cookie 长度: {len(doc)}", flush=True)
-    except Exception as e:
-        print(f"  [COOKIE] ⚠️ 刷新失败: {e}", flush=True)
-
-    # ---- 4. 注入目标 cookie ----
+    # ---- 2. 只调 page.set_cookies ----
     try:
         page.set_cookies(cookies_list)
         print(f"  [COOKIE] ✅ page.set_cookies 调用成功", flush=True)
@@ -640,7 +625,7 @@ def set_session_cookie(page, cookies_data):
         print(f"  [COOKIE] ❌ page.set_cookies 失败: {e}", flush=True)
         return False
 
-    # ---- 5. JS 兜底 ----
+    # ---- 3. JS 兜底 ----
     try:
         page.run_js(f"document.cookie = 'PHPSESSID={sess_value}; path=/; SameSite=Lax';")
         print(f"  [COOKIE] ✅ JS 注入完成", flush=True)
@@ -1209,6 +1194,13 @@ def renew_account(account):
             return "failed", {"step": "访问 vps-info", "error": "网络故障"}
         page.wait(2)
 
+        # 二次刷新，让 cookie 完全生效
+        if not safe_get(page, "https://hax.co.id/vps-info", timeout=20):
+            print("  ❌ 再次访问 vps-info 失败", flush=True)
+            notify_failed(phone, "访问 vps-info", "网络故障", bot_token, chat_id)
+            return "failed", {"step": "访问 vps-info", "error": "网络故障"}
+        page.wait(2)
+
         if not is_logged_in(page):
             print("  ❌ Cookie 未生效，跳过该账号", flush=True)
             try:
@@ -1495,7 +1487,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (纯 Cookie + 清除残留)", flush=True)
+    print("   HAX 自动续期 (纯 Cookie + 诊断 + 网络重试)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
