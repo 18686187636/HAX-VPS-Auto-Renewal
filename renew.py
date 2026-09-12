@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HAX VPS Auto-Renewal (CF 挑战感知版)
-- 区分 CF 挑战页和真 session 过期
-- CF 挑战时等待更久 + 更多重试次数
-- 纯 Cookie，不用 OAuth
+HAX VPS Auto-Renewal (CF 挑战感知版 - 等待 105s)
 """
 import os
 import sys
@@ -44,9 +41,9 @@ MAX_RENEW_ROUNDS = int(os.getenv("MAX_RENEW_ROUNDS", "5"))
 
 NAV_RETRY = int(os.getenv("NAV_RETRY", "3"))
 NAV_RETRY_DELAY = int(os.getenv("NAV_RETRY_DELAY", "10"))
-REQ_RETRY = int(os.getenv("REQ_RETRY", "5"))              # ★ 从 3 提高到 5
-REQ_RETRY_DELAY = int(os.getenv("REQ_RETRY_DELAY", "20")) # ★ CF 挑战等更久
-CF_CHALLENGE_DELAY = int(os.getenv("CF_CHALLENGE_DELAY", "45"))  # ★ CF 挑战专用延迟
+REQ_RETRY = int(os.getenv("REQ_RETRY", "5"))
+REQ_RETRY_DELAY = int(os.getenv("REQ_RETRY_DELAY", "20"))
+CF_CHALLENGE_DELAY = int(os.getenv("CF_CHALLENGE_DELAY", "105"))   # ★ 45 → 105
 
 IGNORE_COOKIE_NAMES = {
     "_ga", "_gid", "_gat_gtag_UA_179253361_1", "_ga_MK6PLQ755F",
@@ -521,12 +518,8 @@ def _cookie_attr(c, attr, default=""):
     return getattr(c, attr, default)
 
 
-# ===================== ★ requests 探测（CF 挑战感知 + 重试）=====================
+# ===================== requests 探测（CF 挑战感知 + 重试）=====================
 def probe_cookie_with_requests(sess_value, retry=REQ_RETRY):
-    """
-    返回 (status, info):
-      status: "ok" / "cf" / "expired" / "error"
-    """
     proxies = get_proxies()
     headers = {
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:155.0) Gecko/20100101 Firefox/155.0",
@@ -552,7 +545,6 @@ def probe_cookie_with_requests(sess_value, retry=REQ_RETRY):
             print(f"    [探测] 第{attempt+1}/{retry}次: HTTP {r.status_code}, "
                   f"final={r.url}, len={len(text)}", flush=True)
 
-            # ---- 识别 CF 挑战页（特征：__CF$cv$params / challenge-platform）----
             is_cf_challenge = (
                 "__cf$cv$params" in text_lower
                 or "challenge-platform/scripts/jsd" in text_lower
@@ -564,13 +556,10 @@ def probe_cookie_with_requests(sess_value, retry=REQ_RETRY):
             has_vps_title = "VPS Information" in text
             has_logout = "Logout" in text or "Log out" in text
 
-            # ---- 优先判定成功 ----
             if has_valid_until or has_vps_title or has_logout:
                 return "ok", f"服务端有效 (HTTP {r.status_code}, len={len(text)})"
 
-            # ---- 判定 CF 挑战 ----
             if is_cf_challenge:
-                # CF 挑战：等更久再重试
                 if attempt < retry - 1:
                     print(f"    [探测] 检测到 CF 挑战，等待 {CF_CHALLENGE_DELAY}s 后重试", flush=True)
                     time.sleep(CF_CHALLENGE_DELAY)
@@ -578,15 +567,12 @@ def probe_cookie_with_requests(sess_value, retry=REQ_RETRY):
                 else:
                     return "cf", f"Cloudflare 挑战（重试 {retry} 次仍未通过）"
 
-            # ---- 判定 session 过期（无 CF 特征 + 短页面 + 重定向登录）----
             has_redirect_to_login = ('http-equiv="refresh"' in text_lower
                                      and '/login' in text_lower)
             if has_redirect_to_login and not is_cf_challenge:
                 return "expired", "session 过期（重定向到 /login）"
 
-            # ---- 短页面，无任何特征 ----
             if len(text) < 2000:
-                # 也当成 CF 挑战处理（可能是未知页面）
                 if attempt < retry - 1:
                     print(f"    [探测] 短页面（{len(text)}B），等待 {CF_CHALLENGE_DELAY}s 后重试", flush=True)
                     time.sleep(CF_CHALLENGE_DELAY)
@@ -624,7 +610,6 @@ def set_session_cookie(page, cookies_data):
 
     print(f"  [COOKIE] 目标 PHPSESSID: {sess_value[:8]}...{sess_value[-4:]}", flush=True)
 
-    # ---- 0. requests 探测 ----
     status, info = probe_cookie_with_requests(sess_value)
     if status == "ok":
         print(f"  [COOKIE] ✅ requests 探测：{info}", flush=True)
@@ -638,14 +623,12 @@ def set_session_cookie(page, cookies_data):
         print(f"  [COOKIE] ❌ requests 探测：{info}", flush=True)
         return False
 
-    # ---- 1. 访问 /login ----
     if not safe_get(page, "https://hax.co.id/login", timeout=20):
         print(f"  [COOKIE] ❌ 访问 /login 三次都失败", flush=True)
         return False
     time.sleep(2)
     print(f"  [COOKIE] 当前页面: {page.url}", flush=True)
 
-    # ---- 2. set_cookies ----
     try:
         page.set_cookies(cookies_list)
         print(f"  [COOKIE] ✅ page.set_cookies 调用成功", flush=True)
@@ -653,7 +636,6 @@ def set_session_cookie(page, cookies_data):
         print(f"  [COOKIE] ❌ page.set_cookies 失败: {e}", flush=True)
         return False
 
-    # ---- 3. JS 兜底 ----
     try:
         page.run_js(f"document.cookie = 'PHPSESSID={sess_value}; path=/; SameSite=Lax';")
         print(f"  [COOKIE] ✅ JS 注入完成", flush=True)
@@ -1201,7 +1183,6 @@ def renew_account(account):
 
         debug_print("浏览器启动成功")
 
-        # ---------- Cookie 登录 ----------
         if not session_token:
             print("  ⚠️ 无 session_token，跳过", flush=True)
             return "failed", {"step": "参数校验", "error": "缺少 session_token"}
@@ -1213,7 +1194,6 @@ def renew_account(account):
             notify_failed(phone, "Cookie 注入", "cookie 无效或 CF 挑战", bot_token, chat_id)
             return "failed", {"step": "Cookie 注入", "error": "cookie 无效或 CF 挑战"}
 
-        # ---------- 验证登录态 ----------
         debug_print("Cookie 注入完成，验证登录态")
         time.sleep(1)
         if not safe_get(page, "https://hax.co.id/vps-info", timeout=20):
@@ -1250,7 +1230,6 @@ def renew_account(account):
         except Exception as e:
             print(f"  [截图] 登录截图失败: {e}", flush=True)
 
-        # ---------- 检测是否需要续期 ----------
         if "hax.co.id/vps-info" not in (page.url or ""):
             safe_get(page, "https://hax.co.id/vps-info", timeout=15)
         page.wait(2)
@@ -1265,7 +1244,6 @@ def renew_account(account):
             notify_skipped(phone, valid_until, remaining_hours, bot_token, chat_id)
             return "skipped", {"valid_until": valid_until, "remaining_hours": remaining_hours}
 
-        # ---------- 导航到续期 ----------
         debug_print("导航到 VPS 续期")
         vps_menu = None
         for _ in range(5):
@@ -1288,7 +1266,6 @@ def renew_account(account):
         print("  [NAV] 点击 VPS Renew", flush=True)
         page.wait(5)
 
-        # ---------- 填写表单 ----------
         debug_print("填写续期表单")
         web_input = page.ele("css:#web_address")
         if web_input:
@@ -1317,7 +1294,6 @@ def renew_account(account):
         except Exception as e:
             print(f"  [截图] Renew VPS 截图失败: {e}", flush=True)
 
-        # ---------- 获取续期码 ----------
         debug_print("开始获取续期码")
         code = read_code_from_file()
         source = "file"
@@ -1348,7 +1324,6 @@ def renew_account(account):
 
         print(f"  [CODE] 使用原始码（长度 {len(code)}）", flush=True)
 
-        # ---------- 进入续期码输入页 ----------
         debug_print("进入续期码输入页")
         renew_code_link = None
         for selector in [
@@ -1371,7 +1346,6 @@ def renew_account(account):
 
         close_ads(page)
 
-        # ---------- 算术验证码 ----------
         captcha_result = solve_arithmetic_captcha(page)
         if captcha_result is not None:
             code_input = page.ele("css:#captcha")
@@ -1379,7 +1353,6 @@ def renew_account(account):
                 code_input.input(str(captcha_result), clear=True)
                 print(f"  [CAPTCHA] 输入结果: {captcha_result}", flush=True)
 
-        # 填入续期码
         debug_print("填入续期码")
         vcode_input = None
         for selector in ["css:input.form-control:not(#captcha)",
@@ -1401,7 +1374,6 @@ def renew_account(account):
             vcode_input.input(code, clear=True)
             print(f"  [CODE] 输入 renewal code（长度 {len(code)}）", flush=True)
 
-        # ---------- reCAPTCHA ----------
         debug_print("开始 reCAPTCHA")
         print("  [reCAPTCHA] 处理音频验证...", flush=True)
         recaptcha_solved = solve_recaptcha(page, timeout=90)
@@ -1410,7 +1382,6 @@ def renew_account(account):
             page.wait(60)
             recaptcha_solved = is_recaptcha_solved(page)
 
-        # ---------- 提交 ----------
         debug_print("提交续期")
         print("  [SUBMIT] 提交续期...", flush=True)
         close_ads(page)
@@ -1437,7 +1408,6 @@ def renew_account(account):
         print("  [SUBMIT] 已点击提交，等待结果...", flush=True)
         time.sleep(60)
 
-        # ---------- 结果检查 ----------
         debug_print("检查续期结果")
         for _ in range(3):
             close_ads(page)
@@ -1514,7 +1484,7 @@ def renew_account(account):
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print("#########################", flush=True)
-    print("   HAX 自动续期 (CF 挑战感知版)", flush=True)
+    print("   HAX 自动续期 (CF 挑战感知版 - 等待 105s)", flush=True)
     print("#########################", flush=True)
     if not ACCOUNTS:
         print("❌ 未加载账号，请设置 ACCOUNTS_JSON", flush=True)
