@@ -1502,11 +1502,11 @@ def renew_account(account):
             close_ads(page)
             time.sleep(1)
         page.run_js(
-    "document.querySelectorAll("
-    "'.overlay, .modal, .popup, [class*=\"overlay\"], "
-    "[class*=\"modal\"], [class*=\"popup\"]'"
-    ").forEach(el => el.remove());"
-)
+            "document.querySelectorAll("
+            "'.overlay, .modal, .popup, [class*=\"overlay\"], "
+            "[class*=\"modal\"], [class*=\"popup\"]'"
+            ").forEach(el => el.remove());"
+        )
         time.sleep(2)
         page.wait.doc_loaded(timeout=15)
         page.wait(3)
