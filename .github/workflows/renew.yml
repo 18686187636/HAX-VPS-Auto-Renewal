@@ -240,7 +240,7 @@ jobs:
           python3 forwarder.py &
           PID3=$!
 
-          # --- 新增 账号4 ~ 6 ---
+          # --- 新增 账号4 ~ 7 ---
           SESSION_STRING=${{ secrets.SESSION_STRING_4 }} \
           TARGET_BOT_TOKEN=${{ secrets.BOT_TOKEN_4 }} \
           TARGET_CHAT_ID=${{ secrets.CHAT_ID_4 }} \
@@ -259,14 +259,20 @@ jobs:
           python3 forwarder.py &
           PID6=$!
 
-          echo "🚀 六个转发器已启动 (PIDs: $PID1, $PID2, $PID3, $PID4, $PID5, $PID6)"
+          SESSION_STRING=${{ secrets.SESSION_STRING_7 }} \
+          TARGET_BOT_TOKEN=${{ secrets.BOT_TOKEN_7 }} \
+          TARGET_CHAT_ID=${{ secrets.CHAT_ID_7 }} \
+          python3 forwarder.py &
+          PID7=$!
+
+          echo "🚀 七个转发器已启动 (PIDs: $PID1, $PID2, $PID3, $PID4, $PID5, $PID6, $PID7)"
           sleep 8  # 等待转发器初始化
 
           # 运行续期脚本
           xvfb-run --auto-servernum python3 renew.py
 
           # 清理所有转发器进程
-          kill $PID1 $PID2 $PID3 $PID4 $PID5 $PID6 2>/dev/null || true
+          kill $PID1 $PID2 $PID3 $PID4 $PID5 $PID6 $PID7 2>/dev/null || true
 
       - name: Upload screenshots
         if: always()
